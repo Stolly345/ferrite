@@ -1,0 +1,321 @@
+/* Hallmark · shape: app screen · genre: modern-minimal · theme: Rim (deal 2/3, seed desktop-bittorrent-client-people-10e1·10ba4b1a·2026-11-04·r0) · redesign: full
+ * nav: kept (title bar with search, side pane, toolbar, table, details band) · signature: the selected torrent's live measurements set large in Geist Mono · states: starting, empty, nothing found, no selection, several selected, engine error
+ * axes: dark/grotesk-sans/warm · posture: committed · contrast: pass · v2.0.0
+ * rim: night (palette-dark.css) + day, the same material for the Light setting (palette-light.css) · faces: the system UI sans (app scope) + Geist Mono, bundled, OFL */
+/* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V4 · weakest: P/H, the table could be any list app; the measurements go mono and the selected torrent's four numbers are set large, so the screen reads as an instrument */
+
+/*
+ * GTK note: Ferrite is a GTK 4 app, not a web page, so there is no html or body. The tokens are in
+ * palette-dark.css and palette-light.css (swapped from Rust as the theme changes); this file maps
+ * libadwaita onto them and styles each region. Square everything, hairlines for division, depth by
+ * lightness only, colour for state only.
+ */
+
+:root {
+  --font-measure: "Geist Mono", ui-monospace, monospace;
+
+  /* libadwaita, routed through the tokens */
+  --window-bg-color: var(--color-paper);
+  --window-fg-color: var(--color-ink);
+  --view-bg-color: var(--color-paper);
+  --view-fg-color: var(--color-ink);
+  --headerbar-bg-color: var(--color-paper-3);
+  --headerbar-fg-color: var(--color-ink);
+  --headerbar-border-color: var(--color-rule);
+  --headerbar-backdrop-color: var(--color-paper-3);
+  --headerbar-shade-color: transparent;
+  --sidebar-bg-color: var(--color-paper-3);
+  --sidebar-fg-color: var(--color-ink);
+  --sidebar-backdrop-color: var(--color-paper-3);
+  --sidebar-shade-color: transparent;
+  --card-bg-color: var(--color-paper-2);
+  --card-fg-color: var(--color-ink);
+  --card-shade-color: transparent;
+  --popover-bg-color: var(--color-paper-2);
+  --popover-fg-color: var(--color-ink);
+  --popover-shade-color: transparent;
+  --dialog-bg-color: var(--color-paper-2);
+  --dialog-fg-color: var(--color-ink);
+  --thumbnail-bg-color: var(--color-paper-2);
+  --accent-bg-color: var(--color-accent);
+  --accent-fg-color: var(--color-accent-ink);
+  --accent-color: var(--color-accent);
+  --destructive-bg-color: var(--color-error);
+  --destructive-fg-color: var(--color-paper-3);
+  --destructive-color: var(--color-error);
+  --error-bg-color: var(--color-error);
+  --error-fg-color: var(--color-paper-3);
+  --error-color: var(--color-error);
+  --border-color: var(--color-rule);
+}
+
+/* ---- Square everything ---------------------------------------------------------------- */
+
+button, entry, searchentry, spinbutton, dropdown, popover > contents, popover > arrow, toast, tooltip,
+list.boxed-list, list.boxed-list > row, row, modelbutton, check, switch, switch > slider,
+scrollbar slider, progressbar > trough, progressbar > trough > progress, dialog.floating sheet,
+dialog.alert sheet, banner, statuspage button, menubutton > button {
+  border-radius: 0;
+}
+popover > contents, dialog.floating sheet, dialog.alert sheet { box-shadow: 0 0 0 1px var(--color-rule); }
+toast { background: var(--color-paper-2); color: var(--color-ink); box-shadow: 0 0 0 1px var(--color-rule); }
+
+selection { background-color: color-mix(in oklab, var(--color-accent) 35%, transparent); color: var(--color-ink); }
+scrollbar slider { background-color: var(--color-muted-2); }
+
+/* ---- Controls: eight states, colour and fill only, never a transition on everything ---- */
+
+button {
+  transition: background-color 120ms ease-out, color 120ms ease-out, box-shadow 120ms ease-out;
+  font-weight: 500;
+}
+button.flat:hover, button.tab:hover { background-color: var(--color-hover); }
+button.flat:active, button.tab:active, button.flat:checked:active { background-color: var(--color-pressed); }
+button:disabled { opacity: 0.55; }
+
+/* The one filled primary: orange, square, dark ink. */
+button.primary {
+  background-color: var(--color-accent);
+  color: var(--color-accent-ink);
+  box-shadow: none;
+  padding: 0 16px;
+}
+button.primary:hover { background-color: color-mix(in oklab, var(--color-accent) 88%, var(--color-ink)); }
+button.primary:active { background-color: color-mix(in oklab, var(--color-accent) 80%, var(--color-paper-3)); }
+
+/* The secondary: outlined in a hairline. */
+button.secondary {
+  background-color: transparent;
+  color: var(--color-ink);
+  box-shadow: inset 0 0 0 1px var(--color-rule);
+  padding: 0 16px;
+}
+button.secondary:hover { background-color: var(--color-hover); box-shadow: inset 0 0 0 1px var(--color-muted-2); }
+button.secondary:active { background-color: var(--color-pressed); }
+
+/* Focus: a 2px orange ring, drawn at once. */
+button:focus-visible, row:focus-visible, modelbutton:focus-visible, switch:focus-visible,
+checkbutton:focus-visible > check, columnview > listview > row:focus-visible, dropdown:focus-visible > button {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+  transition: none;
+}
+entry:focus-within, searchentry:focus-within, spinbutton:focus-within {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+  transition: none;
+}
+
+entry, searchentry, spinbutton {
+  background-color: var(--color-paper);
+  box-shadow: inset 0 0 0 1px var(--color-rule);
+}
+/* Inside a settings row the field is part of the row: no frame of its own. */
+row spinbutton, row spinbutton:focus-within { background-color: transparent; box-shadow: none; }
+spinbutton > text, spinbutton text { font-family: var(--font-measure); font-feature-settings: "tnum"; }
+
+switch { background-color: var(--color-rule); }
+switch:checked { background-color: var(--color-accent); }
+switch > slider { background-color: var(--color-ink); box-shadow: none; }
+switch:checked > slider { background-color: var(--color-thumb); }
+check { box-shadow: inset 0 0 0 1px var(--color-muted-2); background-color: transparent; }
+check:checked { background-color: var(--color-accent); color: var(--color-accent-ink); box-shadow: none; }
+
+/* Dialog responses: the dialog's one action is filled; Cancel is outlined. */
+dialog.alert button.destructive-action { background-color: var(--color-error); color: var(--color-paper-3); }
+dialog.alert button.destructive-action:hover { background-color: color-mix(in oklab, var(--color-error) 88%, var(--color-ink)); }
+dialog.alert button.destructive-action:active { background-color: color-mix(in oklab, var(--color-error) 80%, var(--color-paper-3)); }
+dialog.alert button.suggested-action { background-color: var(--color-accent); color: var(--color-accent-ink); }
+dialog.alert button.suggested-action:hover { background-color: color-mix(in oklab, var(--color-accent) 88%, var(--color-ink)); }
+dialog.alert button.suggested-action:active { background-color: color-mix(in oklab, var(--color-accent) 80%, var(--color-paper-3)); }
+dialog.alert button:not(.destructive-action):not(.suggested-action) { background-color: transparent; box-shadow: inset 0 0 0 1px var(--color-rule); }
+dialog.alert button:not(.destructive-action):not(.suggested-action):hover { background-color: var(--color-hover); }
+dialog.alert button:not(.destructive-action):not(.suggested-action):active { background-color: var(--color-pressed); }
+
+dialog.alert label.title-2, dialog.alert label.title-3, dialog.alert label.heading { font-weight: 500; }
+
+/* ---- Shell ------------------------------------------------------------------------------ */
+
+headerbar.shell { min-height: 48px; box-shadow: inset 0 -1px var(--color-rule); }
+headerbar.shell .app-title { font-weight: 500; margin-left: 4px; }
+headerbar.shell searchentry { min-height: 32px; background-color: var(--color-paper); }
+
+.sidebar-pane { background-color: var(--color-paper-3); }
+.sidebar-pane list.navigation-sidebar { background: transparent; padding: 8px 0; }
+.sidebar-pane list.navigation-sidebar > row {
+  min-height: 36px;
+  padding: 0 12px 0 20px;
+  margin: 0;
+  color: var(--color-ink-2);
+}
+.sidebar-pane list.navigation-sidebar > row:hover { background-color: var(--color-hover); }
+.sidebar-pane list.navigation-sidebar > row:active { background-color: var(--color-pressed); }
+/* The current view: lifted to the content's paper, an orange square at its edge. */
+.sidebar-pane list.navigation-sidebar > row:selected {
+  background-color: var(--color-paper);
+  background-image: image(var(--color-accent));
+  background-size: 6px 6px;
+  background-position: 8px center;
+  background-repeat: no-repeat;
+  color: var(--color-ink);
+}
+.sidebar-pane .count { color: var(--color-muted); font-family: var(--font-measure); font-size: 0.8em; font-feature-settings: "tnum"; }
+.sidebar-pane .section-title { color: var(--color-muted); font-weight: 500; font-size: 0.875em; margin: 16px 20px 4px 20px; }
+.sidebar-pane .hint { color: var(--color-muted-2); }
+
+.content-layer { background-color: var(--color-paper); box-shadow: inset 1px 0 var(--color-rule); }
+
+/* ---- Torrent page ----------------------------------------------------------------------- */
+
+.toolbar-row { padding: 12px 24px; }
+.toolbar-row button { min-height: 32px; }
+.toolbar-row button.flat { min-width: 36px; padding: 0 8px; color: var(--color-ink-2); }
+.toolbar-row separator { margin: 4px 8px; background-color: var(--color-rule); min-width: 1px; }
+
+.table-region { margin: 0 24px; }
+
+columnview.torrents { background: transparent; }
+columnview.torrents > header > button {
+  background: transparent;
+  box-shadow: inset 0 -1px var(--color-rule);
+  padding: 8px;
+  color: var(--color-muted);
+  font-weight: 500;
+  font-size: 0.875em;
+}
+columnview.torrents > header > button:hover { color: var(--color-ink); background-color: var(--color-hover); }
+columnview.torrents > header > button:active { background-color: var(--color-pressed); }
+columnview.torrents > listview { background: transparent; padding: 0; }
+columnview.torrents > listview > row {
+  min-height: 40px;
+  margin: 0;
+  box-shadow: inset 0 -1px var(--color-rule-2);
+}
+columnview.torrents > listview > row:hover { background-color: var(--color-hover); }
+columnview.torrents > listview > row:active { background-color: var(--color-pressed); }
+/* The chosen row: lifted, with an orange square, as Rim marks the current item. */
+columnview.torrents > listview > row:selected {
+  background-color: var(--color-selected);
+  background-image: image(var(--color-accent));
+  background-size: 6px 6px;
+  background-position: 0 center;
+  background-repeat: no-repeat;
+  color: var(--color-ink);
+}
+columnview.torrents > listview > row > cell { padding: 0 8px; }
+columnview.torrents .dim { color: var(--color-muted); }
+columnview.torrents .error { color: var(--color-error); }
+
+/* Measurements: Geist Mono, tabular, everywhere a number measures something. */
+.measure { font-family: var(--font-measure); font-feature-settings: "tnum"; font-size: 0.9em; }
+
+/* Progress: a 4px square bar on the rule; colour says the state, the status word says it too. */
+progressbar.torrent > trough, progressbar.file > trough {
+  min-height: 4px;
+  min-width: 40px;
+  background-color: var(--color-rule);
+  border: none;
+}
+progressbar.torrent > trough > progress, progressbar.file > trough > progress {
+  min-height: 4px;
+  border: none;
+  background-color: var(--color-accent);
+}
+progressbar.downloading > trough > progress { background-color: var(--color-accent); }
+progressbar.seeding > trough > progress { background-color: var(--color-accent-2); }
+progressbar.inactive > trough > progress { background-color: var(--color-muted-2); }
+progressbar.error > trough > progress { background-color: var(--color-error); }
+progressbar.file.downloading > trough > progress { background-color: var(--color-accent); }
+progressbar.file.seeding > trough > progress { background-color: var(--color-accent-2); }
+progressbar.file.inactive > trough > progress { background-color: var(--color-muted-2); }
+progressbar.file.error > trough > progress { background-color: var(--color-error); }
+
+/* Label tags: square, a hairline frame, a square swatch. */
+.label-pill {
+  box-shadow: inset 0 0 0 1px var(--color-rule);
+  padding: 0 8px;
+  font-size: 0.8em;
+  color: var(--color-ink-2);
+}
+.label-dot { min-width: 8px; min-height: 8px; }
+.label-color-0 { background-color: var(--color-label-0); }
+.label-color-1 { background-color: var(--color-label-1); }
+.label-color-2 { background-color: var(--color-label-2); }
+.label-color-3 { background-color: var(--color-label-3); }
+.label-color-4 { background-color: var(--color-label-4); }
+.label-color-5 { background-color: var(--color-label-5); }
+.label-color-6 { background-color: var(--color-label-6); }
+.label-color-7 { background-color: var(--color-label-7); }
+
+/* The divider between the table and the details band: one hairline. */
+paned.torrent-split > separator { background-color: var(--color-rule); min-height: 1px; background-image: none; }
+
+/* ---- Details band ---------------------------------------------------------------------- */
+
+.details-band { background-color: var(--color-paper-2); color: var(--color-ink); }
+.details-tabs { padding: 0 16px; box-shadow: inset 0 -1px var(--color-rule-2); }
+.details-tabs > button.tab {
+  background: transparent;
+  padding: 8px 12px;
+  color: var(--color-muted);
+  font-weight: 500;
+}
+.details-tabs > button.tab:checked {
+  color: var(--color-ink);
+  box-shadow: inset 0 -2px var(--color-accent);
+}
+.details-tabs .details-name { font-weight: 500; margin-right: 8px; color: var(--color-ink); }
+.details-body { padding: 12px 24px; }
+.details-body .key { color: var(--color-muted); font-size: 0.875em; font-weight: 500; }
+.details-body .value { color: var(--color-ink); }
+.details-body .heading {
+  font-weight: 500;
+  color: var(--color-ink);
+  margin-top: 12px;
+  padding-top: 8px;
+  box-shadow: inset 0 1px var(--color-rule-2);
+}
+.details-row { min-height: 32px; }
+.details-row .dim, .details-body .dim { color: var(--color-muted); }
+
+/* The signature: four live measurements set large, parted by hairlines. */
+.figures { margin-bottom: 4px; }
+.figure { padding: 0 24px; box-shadow: inset 1px 0 var(--color-rule); }
+.figure:first-child { padding-left: 0; box-shadow: none; }
+.figure-label { color: var(--color-muted); font-size: 0.875em; font-weight: 500; }
+.figure-value { font-family: var(--font-measure); font-feature-settings: "tnum"; font-size: 1.728rem; letter-spacing: -0.03em; color: var(--color-ink); }
+.figure-unit { font-family: var(--font-measure); font-size: 0.864rem; color: var(--color-muted); }
+
+/* Pieces: drawn in the state's colour on the rule. */
+.piece-track { background-color: var(--color-rule); min-height: 8px; }
+.piecebar { color: var(--color-accent-2); }
+.piecebar.downloading { color: var(--color-accent); }
+.piecebar.inactive { color: var(--color-muted); }
+.piecebar.error { color: var(--color-error); }
+
+/* Speed graph: download in orange, upload in sky-blue, a hairline base. */
+.graph-down { color: var(--color-accent); }
+.graph-up { color: var(--color-accent-2); }
+.graph-base { color: var(--color-rule); }
+.swatch-down { background-color: var(--color-accent); min-width: 12px; min-height: 2px; }
+.swatch-up { background-color: var(--color-accent-2); min-width: 12px; min-height: 2px; }
+
+/* ---- Settings, lists, dialogs --------------------------------------------------------- */
+
+.settings-page { background: transparent; }
+list.boxed-list {
+  background-color: var(--color-paper-2);
+  box-shadow: inset 0 0 0 1px var(--color-rule);
+}
+list.boxed-list > row { box-shadow: inset 0 -1px var(--color-rule-2); }
+list.boxed-list > row:hover { background-color: var(--color-hover); }
+list.boxed-list > row:active { background-color: var(--color-pressed); }
+preferencesgroup label.heading { font-weight: 500; color: var(--color-ink); }
+row label.subtitle { color: var(--color-muted); }
+
+statuspage > scrolledwindow > viewport > box > clamp > box > label.title { font-weight: 500; letter-spacing: -0.03em; }
+statuspage image.icon { color: var(--color-muted-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  button, row, switch, switch > slider { transition: none; }
+}

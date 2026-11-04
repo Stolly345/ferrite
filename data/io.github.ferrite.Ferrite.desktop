@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Ferrite
+GenericName=BitTorrent Client
+Comment=Download and share files over BitTorrent
+Exec=ferrite %U
+Icon=io.github.ferrite.Ferrite
+Terminal=false
+Categories=Network;FileTransfer;P2P;GTK;
+Keywords=torrent;bittorrent;magnet;download;p2p;
+MimeType=application/x-bittorrent;x-scheme-handler/magnet;
+StartupNotify=true
+StartupWMClass=io.github.ferrite.Ferrite

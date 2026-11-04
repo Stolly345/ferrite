@@ -1,0 +1,34 @@
+[package]
+name = "ferrite"
+version = "0.1.0"
+edition = "2024"
+description = "A precise BitTorrent client for Linux, written in Rust"
+license = "Apache-2.0"
+readme = "README.md"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[package.metadata.deb]
+maintainer = "Alexander Stoll <114888417+Stolly345@users.noreply.github.com>"
+section = "net"
+depends = "libgtk-4-1 (>= 4.18), libadwaita-1-0 (>= 1.7)"
+extended-description = "Ferrite is a BitTorrent client with an exact, modern interface: square edges, hairline rules, every measurement in Geist Mono, colour reserved for state. A ruled torrent table, labels, and a details band with live figures, pieces, files, peers, trackers and a speed graph. GTK 4 + libadwaita, engine: librqbit."
+assets = [
+    ["target/release/ferrite", "usr/bin/", "755"],
+    ["data/io.github.ferrite.Ferrite.desktop", "usr/share/applications/", "644"],
+    ["data/io.github.ferrite.Ferrite.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+]
+
+[dependencies]
+adw = { version = "0.9", package = "libadwaita", features = ["v1_7"] }
+anyhow = "1.0.104"
+dirs = "7.0.0"
+gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
+librqbit = "9.1"
+pango = { version = "0.22", features = ["v1_56"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }

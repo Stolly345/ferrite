@@ -1,0 +1,30 @@
+/* Rim · day: the same material for the Light setting: warm paper, warm black ink, the signals deepened. */
+:root {
+  --color-paper: oklch(97.5% 0.006 80);
+  --color-paper-2: oklch(99.5% 0.003 80);
+  --color-paper-3: oklch(94.5% 0.008 80);
+  --color-ink: oklch(18% 0.010 75);
+  --color-ink-2: oklch(30% 0.010 75);
+  --color-muted: oklch(47% 0.012 78);
+  --color-muted-2: oklch(62% 0.010 78);
+  --color-rule: oklch(84% 0.010 78);
+  --color-rule-2: oklch(91% 0.008 78);
+  --color-accent: oklch(65% 0.18 45);
+  --color-accent-ink: oklch(14% 0.02 45);
+  --color-accent-2: oklch(56% 0.13 250);
+  --color-focus: oklch(58% 0.17 45);
+  --color-error: oklch(54% 0.19 27);
+  --color-hover: oklch(18% 0.010 75 / 0.04);
+  --color-pressed: oklch(18% 0.010 75 / 0.08);
+  --color-selected: oklch(18% 0.010 75 / 0.09);
+  --color-thumb: oklch(99.5% 0.003 80);
+
+  --color-label-0: oklch(56% 0.12 250);
+  --color-label-1: oklch(56% 0.12 300);
+  --color-label-2: oklch(56% 0.12 150);
+  --color-label-3: oklch(60% 0.12 85);
+  --color-label-4: oklch(56% 0.12 27);
+  --color-label-5: oklch(56% 0.12 350);
+  --color-label-6: oklch(56% 0.12 195);
+  --color-label-7: oklch(56% 0.02 80);
+}

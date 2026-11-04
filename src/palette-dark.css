@@ -1,0 +1,31 @@
+/* Rim · night: warm black paper, warm off-white ink, an orange signal and a sky-blue second. */
+:root {
+  --color-paper: oklch(9% 0.008 75);
+  --color-paper-2: oklch(12.5% 0.009 75);
+  --color-paper-3: oklch(6.5% 0.007 75);
+  --color-ink: oklch(94% 0.010 80);
+  --color-ink-2: oklch(84% 0.011 80);
+  --color-muted: oklch(68% 0.012 80);
+  --color-muted-2: oklch(50% 0.010 80);
+  --color-rule: oklch(25% 0.010 78);
+  --color-rule-2: oklch(16% 0.009 78);
+  --color-accent: oklch(72% 0.17 45);
+  --color-accent-ink: oklch(10% 0.02 45);
+  --color-accent-2: oklch(74% 0.12 250);
+  --color-focus: oklch(78% 0.15 45);
+  --color-error: oklch(72% 0.15 27);
+  --color-hover: oklch(94% 0.010 80 / 0.04);
+  --color-pressed: oklch(94% 0.010 80 / 0.08);
+  --color-selected: oklch(94% 0.010 80 / 0.10);
+  --color-thumb: oklch(94% 0.010 80);
+
+  /* Label tones: one lightness and chroma, eight hues; the last is a neutral. */
+  --color-label-0: oklch(72% 0.11 250);
+  --color-label-1: oklch(72% 0.11 300);
+  --color-label-2: oklch(72% 0.11 150);
+  --color-label-3: oklch(72% 0.11 85);
+  --color-label-4: oklch(72% 0.11 27);
+  --color-label-5: oklch(72% 0.11 350);
+  --color-label-6: oklch(72% 0.11 195);
+  --color-label-7: oklch(66% 0.02 80);
+}
