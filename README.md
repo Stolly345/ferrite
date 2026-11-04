@@ -9,8 +9,10 @@ A precise BitTorrent client for Linux, written entirely in Rust.
 
 Ferrite downloads and seeds torrents in an interface built like an instrument: square edges, hairlines instead of
 boxes, every measurement — sizes, speeds, time left, peers — set in Geist Mono, and colour that only ever means
-state. **Orange** is downloading and your current selection, **sky-blue** is seeding and upload, **grey** is paused,
-**red** is an error, and every colour comes with a status word.
+state. **Your desktop's accent colour** marks downloading, the main action and your current selection; a second
+colour marks seeding and upload (sky-blue, or green when your accent is blue-ish so the two never match); **grey**
+is paused, **red** is an error, and every colour comes with a status word. Without a desktop accent, Ferrite uses its
+own orange — as in these pictures.
 
 - **Interface:** GTK 4 + libadwaita, through [gtk4-rs](https://gtk-rs.org)
 - **Engine:** [librqbit](https://github.com/ikatson/rqbit), a BitTorrent engine written in Rust: DHT, trackers,
@@ -26,7 +28,7 @@ state. **Orange** is downloading and your current selection, **sky-blue** is see
         <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/speed-dark.png">
         <img alt="The Speed tab: two minutes of download speed in orange and upload in sky-blue" src="docs/screenshots/speed-light.png">
       </picture>
-      <p><b>Speed</b> — the last two minutes, download in orange, upload in sky-blue.</p>
+      <p><b>Speed</b> — the last two minutes, download in the accent colour, upload in the second.</p>
     </td>
     <td width="50%">
       <picture>
@@ -145,8 +147,9 @@ normal instance and never touches your settings. To render a picture:
 FERRITE_SCREENSHOT=out.png FERRITE_THEME=dark FERRITE_TAB=peers cargo run -- --demo
 ```
 
-`FERRITE_TAB` is `general`, `files`, `peers`, `trackers` or `speed`; `FERRITE_PAGE=settings` opens Settings and
-`FERRITE_ACTION=win.remove` opens the remove dialog.
+`FERRITE_TAB` is `general`, `files`, `peers`, `trackers` or `speed`; `FERRITE_PAGE=settings` opens Settings,
+`FERRITE_ACTION=win.remove` opens the remove dialog, and `FERRITE_ACCENT=ferrite` uses Ferrite's orange instead of the
+desktop accent (as the pictures here do).
 
 ## Where things live
 

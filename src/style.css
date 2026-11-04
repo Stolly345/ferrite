@@ -5,6 +5,9 @@
 /* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V4 · weakest: P/H, the table could be any list app; the measurements go mono and the selected torrent's four numbers are set large, so the screen reads as an instrument */
 
 /*
+ * Accent: main.rs replaces --color-accent, --color-accent-ink and --color-focus with the desktop's accent colour
+ * (libadwaita, live), and moves --color-accent-2 to green when the accent is blue-ish; the orange here is the fallback.
+ *
  * GTK note: Ferrite is a GTK 4 app, not a web page, so there is no html or body. The tokens are in
  * palette-dark.css and palette-light.css (swapped from Rust as the theme changes); this file maps
  * libadwaita onto them and styles each region. Square everything, hairlines for division, depth by

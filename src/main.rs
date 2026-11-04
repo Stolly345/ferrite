@@ -230,19 +230,54 @@ fn load_css() {
     style.load_from_string(include_str!("style.css"));
     gtk::style_context_add_provider_for_display(&display, &style, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
 
-    // The palette follows libadwaita's light/dark state, including a theme forced in Settings.
+    // The palette follows libadwaita's light/dark state (including a theme forced in Settings) and the
+    // desktop's accent colour; both can change while Ferrite runs.
     let palette = gtk::CssProvider::new();
     report_css_errors(&palette, "palette");
     gtk::style_context_add_provider_for_display(&display, &palette, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
     let apply = move |sm: &adw::StyleManager| {
-        if std::env::var("FERRITE_DEBUG").is_ok() { eprintln!("palette: dark={}", sm.is_dark()); }
-        palette.load_from_string(if sm.is_dark() {
+        let base = if sm.is_dark() {
             include_str!("palette-dark.css")
         } else {
             include_str!("palette-light.css")
-        });
+        };
+        palette.load_from_string(&format!("{base}\n{}", accent_css(sm)));
     };
     let sm = adw::StyleManager::default();
     apply(&sm);
-    sm.connect_dark_notify(apply);
+    sm.connect_dark_notify(apply.clone());
+    sm.connect_accent_color_notify(apply);
+}
+
+fn css_rgb(c: &gdk::RGBA) -> String {
+    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("rgb({} {} {})", ch(c.red()), ch(c.green()), ch(c.blue()))
+}
+
+/// The desktop's accent colour, overriding the palette's orange. The accent marks downloading, the
+/// main action, the current selection and focus. Seeding keeps the palette's sky-blue unless the accent
+/// is itself blue-ish, in which case seeding turns green so the two states never share a colour.
+/// Ferrite's orange stays when the desktop has no accent colour (or with FERRITE_ACCENT=ferrite).
+fn accent_css(sm: &adw::StyleManager) -> String {
+    if !sm.is_system_supports_accent_colors() || std::env::var("FERRITE_ACCENT").as_deref() == Ok("ferrite") {
+        return String::new();
+    }
+    let accent = sm.accent_color();
+    let dark = sm.is_dark();
+    let fill = accent.to_rgba();
+    let focus = accent.to_standalone_rgba(dark);
+    // Text on the accent: dark ink on light accents (yellow, teal…), light ink on deep ones.
+    let lum = 0.2126 * fill.red() + 0.7152 * fill.green() + 0.0722 * fill.blue();
+    let ink = if lum > 0.55 { "oklch(14% 0.02 80)" } else { "oklch(98% 0.005 80)" };
+    let second = match accent {
+        adw::AccentColor::Blue | adw::AccentColor::Teal | adw::AccentColor::Slate => {
+            if dark { "--color-accent-2: oklch(74% 0.13 150);" } else { "--color-accent-2: oklch(56% 0.13 150);" }
+        }
+        _ => "",
+    };
+    format!(
+        ":root {{ --color-accent: {}; --color-accent-ink: {ink}; --color-focus: {}; {second} }}",
+        css_rgb(&fill),
+        css_rgb(&focus)
+    )
 }

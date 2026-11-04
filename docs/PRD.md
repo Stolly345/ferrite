@@ -142,8 +142,9 @@ Priority: **P0** blocks 1.0, **P1** wanted for 1.0, **P2** after 1.0.
 5. **Color is never the only signal**: every colored state also has a status word.
 6. **Works from 640×480 to full screen**; the side pane collapses on narrow windows.
 7. **Material**: warm black (dark) or warm paper (light), square edges, hairlines instead of boxes, depth by
-   lightness only. Every measurement in Geist Mono. Colour means state and nothing else: orange downloading, primary
-   action and current selection; sky-blue seeding and upload; grey paused; red error. Tokens in OKLCH, one file per
+   lightness only. Every measurement in Geist Mono. Colour means state and nothing else: the desktop's accent colour
+   (Ferrite's orange when there is none) marks downloading, the primary action and the current selection; sky-blue
+   marks seeding and upload, turning green when the accent is blue, teal or slate; grey paused; red error. Tokens in OKLCH, one file per
    theme (`src/palette-*.css`).
 
 ## 7. Technical design
