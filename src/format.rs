@@ -83,6 +83,11 @@ pub fn ratio(uploaded: u64, downloaded: u64) -> String {
     format!("{:.3}", uploaded as f64 / downloaded as f64)
 }
 
+/// A KB/s limit for people: "No limit" or "500 KB/s".
+pub fn limit(kbps: u32) -> String {
+    if kbps == 0 { "No limit".into() } else { speed(kbps as u64 * 1000) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

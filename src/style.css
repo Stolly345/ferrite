@@ -168,6 +168,10 @@ headerbar.shell searchentry { min-height: 32px; background-color: var(--color-pa
 
 .content-layer { background-color: var(--color-paper); box-shadow: inset 1px 0 var(--color-rule); }
 
+headerbar.shell .totals { color: var(--color-muted); margin-right: 8px; }
+/* The alternative-speed button glows in the accent while slow limits apply. */
+.toolbar-row button.alt-on, .toolbar-row button.alt-on:checked { color: var(--color-accent); background-color: var(--color-hover); }
+
 /* ---- Torrent page ----------------------------------------------------------------------- */
 
 .toolbar-row { padding: 12px 24px; }

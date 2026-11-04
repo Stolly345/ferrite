@@ -10,6 +10,26 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 type FilesCallback = Box<dyn Fn(usize, Vec<usize>)>;
+type PlayCallback = Box<dyn Fn(usize, usize, String)>;
+type PriorityCallback = Box<dyn Fn(usize, usize, u8)>;
+type BanCallback = Box<dyn Fn(String)>;
+
+/// Dropdown positions for file priorities, and the stored values (2 high, 1 normal, 0 low).
+const PRIORITIES: [&str; 3] = ["High", "Normal", "Low"];
+fn priority_to_pos(p: u8) -> u32 {
+    match p {
+        2 => 0,
+        0 => 2,
+        _ => 1,
+    }
+}
+fn pos_to_priority(pos: u32) -> u8 {
+    match pos {
+        0 => 2,
+        2 => 0,
+        _ => 1,
+    }
+}
 
 pub struct DetailsPane {
     pub root: gtk::Box,
@@ -25,8 +45,12 @@ pub struct DetailsPane {
     files_key: RefCell<(usize, usize)>,
     updating_files: Rc<Cell<bool>>,
     on_files: Rc<RefCell<Option<FilesCallback>>>,
+    on_play: Rc<RefCell<Option<PlayCallback>>>,
+    on_priority: Rc<RefCell<Option<PriorityCallback>>>,
+    on_ban: Rc<RefCell<Option<BanCallback>>>,
+    file_priority_widgets: RefCell<Vec<gtk::DropDown>>,
     peers_scroll: gtk::ScrolledWindow,
-    peer_rows: RefCell<Vec<[gtk::Label; 5]>>,
+    peer_rows: RefCell<Vec<[gtk::Label; 6]>>,
     trackers_box: gtk::Box,
     trackers_key: RefCell<Vec<String>>,
     graph: SpeedGraph,
@@ -242,6 +266,10 @@ impl DetailsPane {
             files_key: RefCell::new((usize::MAX, 0)),
             updating_files: Rc::default(),
             on_files: Rc::default(),
+            on_play: Rc::default(),
+            on_priority: Rc::default(),
+            on_ban: Rc::default(),
+            file_priority_widgets: RefCell::default(),
             peers_scroll,
             peer_rows: RefCell::default(),
             trackers_box,
@@ -256,6 +284,21 @@ impl DetailsPane {
     /// Called when the user ticks or unticks files: (torrent id, files to download).
     pub fn connect_files_changed(&self, f: impl Fn(usize, Vec<usize>) + 'static) {
         *self.on_files.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with (torrent id, file index, priority: 2 high, 1 normal, 0 low).
+    pub fn connect_priority(&self, f: impl Fn(usize, usize, u8) + 'static) {
+        *self.on_priority.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with a peer's address when its Ban button is pressed.
+    pub fn connect_ban(&self, f: impl Fn(String) + 'static) {
+        *self.on_ban.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with (torrent id, file index, file name) when a file's Play button is pressed.
+    pub fn connect_play(&self, f: impl Fn(usize, usize, String) + 'static) {
+        *self.on_play.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn show_empty(&self, text: &str) {
@@ -333,7 +376,8 @@ impl DetailsPane {
                     self.pieces.set((0..n).map(|i| i < have).collect(), row.state.css());
                 }
             }
-            self.update_files(row.id, row.state.css(), d);
+            let priorities = meta.map(|m| m.priorities.clone()).unwrap_or_default();
+            self.update_files(row.id, row.state.css(), d, &priorities);
             self.update_peers(&d.peers);
             self.update_trackers(&d.trackers);
         }
@@ -354,13 +398,14 @@ impl DetailsPane {
         }
     }
 
-    fn update_files(&self, id: usize, state_class: &str, d: &Details) {
+    fn update_files(&self, id: usize, state_class: &str, d: &Details, priorities: &[u8]) {
         let key = (id, d.files.len());
         if *self.files_key.borrow() != key {
             *self.files_key.borrow_mut() = key;
             let grid = gtk::Grid::builder().column_spacing(16).row_spacing(2).build();
             grid.add_css_class("details-body");
             let mut widgets = Vec::new();
+            let mut priority_widgets = Vec::new();
             if d.files.is_empty() {
                 self.files_scroll.set_child(Some(&empty_label("The file list arrives with the torrent's metadata")));
                 self.file_widgets.borrow_mut().clear();
@@ -385,6 +430,36 @@ impl DetailsPane {
                 grid.attach(&size, 2, r as i32, 1, 1);
                 grid.attach(&bar, 3, r as i32, 1, 1);
                 grid.attach(&pct, 4, r as i32, 1, 1);
+                let prio = gtk::DropDown::from_strings(&PRIORITIES);
+                prio.set_valign(gtk::Align::Center);
+                prio.set_tooltip_text(Some("Download priority"));
+                prio.set_selected(priority_to_pos(priorities.get(r).copied().unwrap_or(1)));
+                let (cb, updating) = (self.on_priority.clone(), self.updating_files.clone());
+                prio.connect_selected_notify(move |dd| {
+                    if updating.get() {
+                        return;
+                    }
+                    if let Some(cb) = cb.borrow().as_ref() {
+                        cb(id, r, pos_to_priority(dd.selected()));
+                    }
+                });
+                grid.attach(&prio, 6, r as i32, 1, 1);
+                priority_widgets.push(prio);
+                if super::play::is_media(&f.name) {
+                    let play = gtk::Button::builder()
+                        .icon_name("media-playback-start-symbolic")
+                        .tooltip_text("Play")
+                        .valign(gtk::Align::Center)
+                        .css_classes(["flat"])
+                        .build();
+                    let (cb, name) = (self.on_play.clone(), f.name.clone());
+                    play.connect_clicked(move |_| {
+                        if let Some(cb) = cb.borrow().as_ref() {
+                            cb(id, r, name.clone());
+                        }
+                    });
+                    grid.attach(&play, 5, r as i32, 1, 1);
+                }
                 widgets.push((check, bar, pct));
             }
             // Ticking a box sends the new set of files to the engine.
@@ -411,6 +486,7 @@ impl DetailsPane {
             self.files_scroll.set_child(Some(&grid));
             *self.files_grid.borrow_mut() = grid;
             *self.file_widgets.borrow_mut() = widgets;
+            *self.file_priority_widgets.borrow_mut() = priority_widgets;
         }
         self.updating_files.set(true);
         for (f, (check, bar, pct)) in d.files.iter().zip(self.file_widgets.borrow().iter()) {
@@ -450,23 +526,40 @@ impl DetailsPane {
                     l.add_css_class("details-row");
                     l
                 };
+                // address, client, has, down, up, flags
                 let cells = [
                     mk(0.0, false, false),
                     mk(0.0, true, true),
+                    mk(1.0, false, true),
                     mk(1.0, false, false),
                     mk(1.0, false, false),
                     mk(0.0, false, true),
                 ];
-                for i in [0, 2, 3] {
+                for i in [0, 2, 3, 4] {
                     cells[i].add_css_class("measure");
                 }
                 cells[0].set_width_chars(24);
-                cells[2].set_width_chars(10);
+                cells[2].set_width_chars(6);
                 cells[3].set_width_chars(10);
-                cells[4].set_width_chars(16);
+                cells[4].set_width_chars(10);
+                cells[5].set_width_chars(16);
+                cells[2].set_tooltip_text(Some("How much of the torrent this peer has"));
                 for (c, l) in cells.iter().enumerate() {
                     grid.attach(l, c as i32, r as i32, 1, 1);
                 }
+                let ban = gtk::Button::builder()
+                    .icon_name("action-unavailable-symbolic")
+                    .tooltip_text("Ban this peer")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+                let (cb, addr_label) = (self.on_ban.clone(), cells[0].clone());
+                ban.connect_clicked(move |_| {
+                    if let Some(cb) = cb.borrow().as_ref() {
+                        cb(addr_label.label().to_string());
+                    }
+                });
+                grid.attach(&ban, 6, r as i32, 1, 1);
                 rows.push(cells);
             }
             self.peers_scroll.set_child(Some(&grid));
@@ -474,9 +567,10 @@ impl DetailsPane {
         for (p, cells) in peers.iter().zip(rows.iter()) {
             cells[0].set_label(&p.addr);
             cells[1].set_label(&p.client);
-            cells[2].set_label(&format::speed(p.down_bps));
-            cells[3].set_label(&format::speed(p.up_bps));
-            cells[4].set_label(&p.flags);
+            cells[2].set_label(&p.progress.map(|f| format!("{:.0}%", f * 100.0)).unwrap_or_default());
+            cells[3].set_label(&format::speed(p.down_bps));
+            cells[4].set_label(&format::speed(p.up_bps));
+            cells[5].set_label(&p.flags);
         }
     }
 

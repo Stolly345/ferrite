@@ -25,10 +25,25 @@ assets = [
 [dependencies]
 adw = { version = "0.9", package = "libadwaita", features = ["v1_7"] }
 anyhow = "1.0.104"
+async-channel = "2"
 dirs = "7.0.0"
 gtk = { version = "0.11", package = "gtk4", features = ["v4_18"] }
-librqbit = "9.1"
+ksni = "0.3"
+librqbit = { version = "9.1", features = ["http-api", "tracing-subscriber-utils", "webui"] }
+librqbit-bencode = "9.1"
+librqbit-dualstack-sockets = "0.7"
 pango = { version = "0.22", features = ["v1_56"] }
+regex = "1"
+reqwest = "0.13"
+rss = "2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+
+# librqbit with Ferrite's patches (see vendor/librqbit/FERRITE-PATCHES.md).
+[patch.crates-io]
+librqbit = { path = "vendor/librqbit" }
+
+[dev-dependencies]
+sha1 = "0.10"

@@ -133,6 +133,23 @@ pub struct Window {
     prev_state: RefCell<HashMap<String, State>>,
     settings_page: RefCell<Option<adw::PreferencesPage>>,
     quitting: Cell<bool>,
+    /// Total speeds in the title bar.
+    totals: gtk::Label,
+    /// Alternative ("slow") speed limits, on by hand.
+    alt_btn: gtk::ToggleButton,
+    /// The global limits last given to the engine (they change with the schedule).
+    applied_limits: Cell<Option<(u32, u32)>>,
+    /// Torrents asked to start a moment ago (they hold a queue slot until running).
+    starting: RefCell<HashMap<String, std::time::Instant>>,
+    ticks: Cell<u64>,
+    tray: RefCell<Option<ksni::Handle<crate::tray::FerriteTray>>>,
+    /// Keeps the app alive while the window is closed and Ferrite seeds in the background.
+    hold: RefCell<Option<gio::ApplicationHoldGuard>>,
+    pub demo: bool,
+    /// Streaming and remote control.
+    server: RefCell<Option<crate::server::Server>>,
+    /// Stops the NAT-PMP port mapping (and removes it) on quit.
+    natpmp_stop: tokio_util::sync::CancellationToken,
 }
 
 impl Window {
@@ -163,6 +180,11 @@ impl Window {
             .width_request(480)
             .build();
         header.set_title_widget(Some(&search));
+        let totals = gtk::Label::builder()
+            .css_classes(["measure", "totals"])
+            .tooltip_text("Total download and upload speed")
+            .build();
+        header.pack_end(&totals);
 
         // --- Side pane
         let nav = gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build();
@@ -215,6 +237,14 @@ impl Window {
         let down_btn = tool("go-down-symbolic", "Move down (Alt+Down)", "win.move-down");
         toolbar.append(&up_btn);
         toolbar.append(&down_btn);
+        toolbar.append(&sep());
+        let alt_btn = gtk::ToggleButton::builder()
+            .icon_name("power-profile-power-saver-symbolic")
+            .tooltip_text("Alternative speed limits")
+            .css_classes(["flat"])
+            .build();
+        alt_btn.update_property(&[gtk::accessible::Property::Label("Alternative speed limits")]);
+        toolbar.append(&alt_btn);
         let more_menu = gio::Menu::new();
         let order = gio::Menu::new();
         order.append(Some("Move to top"), Some("win.move-top"));
@@ -223,6 +253,9 @@ impl Window {
         let all = gio::Menu::new();
         all.append(Some("Select all"), Some("win.select-all"));
         all.append(Some("Copy magnet link"), Some("win.copy-magnet"));
+        let make = gio::Menu::new();
+        make.append(Some("Create torrent…"), Some("win.create-torrent"));
+        more_menu.append_section(None, &make);
         more_menu.append_section(None, &all);
         let more = gtk::MenuButton::builder()
             .icon_name("view-more-horizontal-symbolic")
@@ -399,6 +432,16 @@ impl Window {
             prev_state: RefCell::default(),
             settings_page: RefCell::default(),
             quitting: Cell::new(false),
+            totals,
+            alt_btn,
+            applied_limits: Cell::new(None),
+            starting: RefCell::default(),
+            ticks: Cell::new(0),
+            tray: RefCell::default(),
+            hold: RefCell::default(),
+            demo,
+            server: RefCell::default(),
+            natpmp_stop: Default::default(),
         });
 
         let weak = Rc::downgrade(&win);
@@ -456,16 +499,107 @@ impl Window {
                 }
             }
         }
+        let rt = engine.api().map(|(_, rt)| rt);
         *self.engine.borrow_mut() = Some(Rc::new(engine));
         self.refresh();
         let weak = self.weak();
         glib::timeout_add_local(Duration::from_secs(1), move || match weak.upgrade() {
             Some(w) if !w.quitting.get() => {
-                w.refresh();
+                w.tick();
                 glib::ControlFlow::Continue
             }
             _ => glib::ControlFlow::Break,
         });
+        if let Some(rt) = rt {
+            self.start_tray(rt.clone());
+            self.start_server();
+            if self.config.borrow().upnp
+                && let Some(port) = self.engine().and_then(|e| e.listen_port())
+            {
+                let stop = self.natpmp_stop.clone();
+                rt.spawn(async move {
+                    // Routers without NAT-PMP simply don't answer; UPnP (in the engine) covers those.
+                    if let Err(e) = crate::natpmp::keep_mapped(port, stop).await {
+                        eprintln!("NAT-PMP: {e:#}");
+                    }
+                });
+            }
+            if let Some(e) = self.engine() {
+                for ip in self.config.borrow().banned.iter().filter_map(|s| s.parse().ok()) {
+                    e.ban(ip);
+                }
+            }
+        }
+    }
+
+    pub fn server(&self) -> Option<crate::server::Server> {
+        self.server.borrow().clone()
+    }
+
+    fn start_server(self: &Rc<Self>) {
+        let Some((api, rt)) = self.engine().and_then(|e| e.api()) else { return };
+        let cfg = self.config.borrow().clone();
+        if cfg.remote_enabled && cfg.remote_password.is_empty() {
+            self.toast("Remote control needs a password — set one in Settings");
+        }
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let result = crate::server::start(api, rt, &cfg).await;
+            let Some(w) = weak.upgrade() else { return };
+            match result {
+                Ok(server) => *w.server.borrow_mut() = Some(server),
+                Err(e) => w.toast(&format!("Remote control and streaming are off: {e:#}")),
+            }
+        });
+    }
+
+    /// The tray icon: brings the window back, pauses or resumes everything, quits.
+    fn start_tray(self: &Rc<Self>, rt: tokio::runtime::Handle) {
+        let (tx, rx) = async_channel::bounded(16);
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let handle = crate::tray::start(rt, tx).await;
+            if let Some(w) = weak.upgrade() {
+                *w.tray.borrow_mut() = handle;
+            }
+            while let Ok(event) = rx.recv().await {
+                let Some(w) = weak.upgrade() else { break };
+                use crate::tray::TrayEvent;
+                match event {
+                    TrayEvent::Show => w.show(),
+                    TrayEvent::PauseAll => w.set_paused(w.all_items(), true),
+                    TrayEvent::ResumeAll => w.resume_all(),
+                    TrayEvent::Quit => w.quit(),
+                }
+            }
+        });
+    }
+
+    /// A setting changed: let the next rules pass re-apply limits.
+    pub fn settings_changed(self: &Rc<Self>) {
+        self.applied_limits.set(None);
+        self.apply_rules();
+    }
+
+    pub fn show(&self) {
+        self.window.set_visible(true);
+        self.window.present();
+    }
+
+    /// Once a second: refresh the list, then apply the queue, seeding goals and speed schedule.
+    fn tick(self: &Rc<Self>) {
+        self.ticks.set(self.ticks.get() + 1);
+        self.refresh();
+        self.apply_rules();
+        if self.ticks.get().is_multiple_of(5) {
+            crate::watch::scan(self);
+        }
+        crate::feeds::tick(self);
+    }
+
+    pub fn show_engine_warning(&self, text: &str) {
+        self.banner.set_title(text);
+        self.banner.set_revealed(true);
     }
 
     pub fn show_engine_error(&self, err: &anyhow::Error) {
@@ -692,6 +826,49 @@ impl Window {
         });
 
         let weak = self.weak();
+        self.details.connect_priority(move |id, idx, prio| {
+            let Some(w) = weak.upgrade() else { return };
+            let Some(item) = w.items.borrow().values().find(|i| i.id() == id).cloned() else { return };
+            {
+                let mut cfg = w.config.borrow_mut();
+                let meta = cfg.torrents.entry(item.hash()).or_default();
+                if meta.priorities.len() <= idx {
+                    meta.priorities.resize(idx + 1, 1);
+                }
+                meta.priorities[idx] = prio;
+                cfg.save();
+            }
+            w.apply_rules();
+        });
+        let weak = self.weak();
+        self.details.connect_ban(move |addr| {
+            let Some(w) = weak.upgrade() else { return };
+            let Ok(sock) = addr.parse::<std::net::SocketAddr>() else { return };
+            let ip = sock.ip();
+            if let Some(e) = w.engine() {
+                e.ban(ip);
+            }
+            {
+                let mut cfg = w.config.borrow_mut();
+                if !cfg.banned.contains(&ip.to_string()) {
+                    cfg.banned.push(ip.to_string());
+                }
+                cfg.save();
+            }
+            w.toast(&format!("Banned {ip} — clear bans in Settings"));
+            w.refresh();
+        });
+        let weak = self.weak();
+        self.details.connect_play(move |id, idx, name| {
+            let Some(w) = weak.upgrade() else { return };
+            let complete = w
+                .engine()
+                .and_then(|e| e.details(id))
+                .and_then(|d| d.files.get(idx).map(|f| f.size > 0 && f.done >= f.size))
+                .unwrap_or(false);
+            super::play::play_file(&w, id, idx, &name, complete);
+        });
+        let weak = self.weak();
         self.details.connect_files_changed(move |id, files| {
             let Some(w) = weak.upgrade() else { return };
             let Some(engine) = w.engine() else { return };
@@ -752,34 +929,31 @@ impl Window {
         });
         self.window.add_controller(drop);
 
-        // Remember the window size and the details pane height.
+        // Closing the window keeps Ferrite seeding in the background (Settings can turn that off).
         let weak = self.weak();
         self.window.connect_close_request(move |win| {
             let Some(w) = weak.upgrade() else { return glib::Propagation::Proceed };
             if w.quitting.get() {
                 return glib::Propagation::Proceed;
             }
-            w.quitting.set(true);
-            {
-                let mut c = w.config.borrow_mut();
-                let (width, height) = win.default_size();
-                c.window_width = width;
-                c.window_height = height;
-                c.details_height = (w.paned.height() - w.paned.position()).max(200);
-                c.save();
+            w.remember_geometry();
+            let background = w.config.borrow().run_in_background && !w.demo && w.engine().is_some();
+            if !background {
+                w.quit();
+                return glib::Propagation::Stop;
             }
             win.set_visible(false);
-            let engine = w.engine();
-            let app = w.app.clone();
-            glib::spawn_future_local(async move {
-                if let Some(e) = engine {
-                    // Give the engine a moment to save resume data, but never hang on exit.
-                    let stop = e.stop();
-                    let timeout = glib::timeout_future(Duration::from_secs(3));
-                    futures_select(stop, timeout).await;
-                }
-                app.quit();
-            });
+            if w.hold.borrow().is_none() {
+                *w.hold.borrow_mut() = Some(w.app.hold());
+            }
+            if !w.config.borrow().background_hint_shown {
+                w.config.borrow_mut().background_hint_shown = true;
+                w.config.borrow().save();
+                let n = gio::Notification::new("Ferrite is still seeding");
+                n.set_body(Some("It keeps running in the background. Open it again from the tray icon, or quit there."));
+                n.set_icon(&gio::ThemedIcon::new(crate::tray::APP_ICON));
+                w.app.send_notification(Some("background"), &n);
+            }
             glib::Propagation::Stop
         });
 
@@ -795,6 +969,39 @@ impl Window {
                     p.set_position((h - wanted).max(160));
                 }
             });
+        });
+    }
+
+    fn remember_geometry(&self) {
+        let mut c = self.config.borrow_mut();
+        let (width, height) = self.window.default_size();
+        c.window_width = width;
+        c.window_height = height;
+        c.details_height = (self.paned.height() - self.paned.position()).max(200);
+        c.save();
+    }
+
+    /// Stops the engine (giving it a moment to save resume data) and quits.
+    pub fn quit(self: &Rc<Self>) {
+        if self.quitting.replace(true) {
+            return;
+        }
+        if self.window.is_visible() {
+            self.remember_geometry();
+        }
+        self.config.borrow().save();
+        self.window.set_visible(false);
+        let engine = self.engine();
+        let app = self.app.clone();
+        self.natpmp_stop.cancel();
+        self.hold.borrow_mut().take();
+        glib::spawn_future_local(async move {
+            if let Some(e) = engine {
+                let stop = e.stop();
+                let timeout = glib::timeout_future(Duration::from_secs(3));
+                futures_select(stop, timeout).await;
+            }
+            app.quit();
         });
     }
 
@@ -815,7 +1022,18 @@ impl Window {
         add("pause", Box::new(|w| w.set_paused(w.selected(), true)));
         add("resume", Box::new(|w| w.set_paused(w.selected(), false)));
         add("pause-all", Box::new(|w| w.set_paused(w.all_items(), true)));
-        add("resume-all", Box::new(|w| w.set_paused(w.all_items(), false)));
+        add("resume-all", Box::new(|w| w.resume_all()));
+        add("start-now", Box::new(|w| w.set_paused(w.selected(), false)));
+        add("quit", Box::new(|w| w.quit()));
+        add("options", Box::new(|w| super::options::show(w, w.selected())));
+        add("move-data", Box::new(|w| super::options::move_data(w, w.selected())));
+        add("verify", Box::new(|w| super::options::verify(w, w.selected())));
+        add("play", Box::new(|w| {
+            if let Some(i) = w.selected().first() {
+                super::play::play_torrent(w, i);
+            }
+        }));
+        add("create-torrent", Box::new(super::create::show));
         add("remove", Box::new(|w| {
             let sel = w.selected();
             if !sel.is_empty() {
@@ -904,7 +1122,19 @@ impl Window {
         self.app.set_accels_for_action("win.add-magnet", &["<Ctrl>n", "<Ctrl>u"]);
         self.app.set_accels_for_action("win.find", &["<Ctrl>f"]);
         self.app.set_accels_for_action("win.settings", &["<Ctrl>comma"]);
-        self.app.set_accels_for_action("window.close", &["<Ctrl>q", "<Ctrl>w"]);
+        self.app.set_accels_for_action("win.quit", &["<Ctrl>q"]);
+        self.app.set_accels_for_action("window.close", &["<Ctrl>w"]);
+
+        let weak = self.weak();
+        self.alt_btn.set_active(self.config.borrow().alt_enabled);
+        self.alt_btn.connect_toggled(move |b| {
+            let Some(w) = weak.upgrade() else { return };
+            if w.config.borrow().alt_enabled != b.is_active() {
+                w.config.borrow_mut().alt_enabled = b.is_active();
+                w.config.borrow().save();
+                w.apply_rules();
+            }
+        });
     }
 
     fn show_row_menu(self: &Rc<Self>, pos: u32, widget: &gtk::Widget, x: f64, y: f64) {
@@ -918,6 +1148,12 @@ impl Window {
         }
         let menu = gio::Menu::new();
         let first = gio::Menu::new();
+        if sel.len() == 1 && super::play::main_media(self, sel[0].id()).is_some() {
+            first.append(Some("Play"), Some("win.play"));
+        }
+        if sel.iter().any(|i| i.state() == State::Queued) {
+            first.append(Some("Start now"), Some("win.start-now"));
+        }
         if sel.iter().all(|i| i.state().is_running()) {
             first.append(Some("Pause"), Some("win.pause"));
         } else {
@@ -926,6 +1162,12 @@ impl Window {
         first.append(Some("Open folder"), Some("win.open-folder"));
         first.append(Some("Copy magnet link"), Some("win.copy-magnet"));
         menu.append_section(None, &first);
+
+        let manage = gio::Menu::new();
+        manage.append(Some("Options…"), Some("win.options"));
+        manage.append(Some("Move data…"), Some("win.move-data"));
+        manage.append(Some("Verify files"), Some("win.verify"));
+        menu.append_section(None, &manage);
 
         let second = gio::Menu::new();
         let labels = gio::Menu::new();
@@ -1034,13 +1276,35 @@ impl Window {
         self.set_paused(sel, running);
     }
 
+    /// Pause takes torrents out of the queue. Resume (and "Start now") runs them at once, past the
+    /// queue's limit; a finished torrent resumed by hand keeps seeding past its goal.
     fn set_paused(self: &Rc<Self>, items: Vec<TorrentItem>, pause: bool) {
         let Some(engine) = self.engine() else { return };
-        let ids: Vec<usize> = items
-            .iter()
-            .filter(|i| i.state().is_running() == pause)
-            .map(|i| i.id())
-            .collect();
+        let mut ids = Vec::new();
+        {
+            let mut cfg = self.config.borrow_mut();
+            for i in &items {
+                let meta = cfg.torrents.entry(i.hash()).or_default();
+                let state = i.state();
+                if pause {
+                    meta.queued = false;
+                    meta.forced = false;
+                    if state.is_running() && state != State::Queued {
+                        ids.push(i.id());
+                    }
+                } else if !state.is_running() || state == State::Queued {
+                    meta.queued = false;
+                    if state.is_complete() {
+                        meta.goal_ignored = true;
+                    } else {
+                        meta.forced = true;
+                        self.starting.borrow_mut().insert(i.hash(), std::time::Instant::now());
+                    }
+                    ids.push(i.id());
+                }
+            }
+            cfg.save();
+        }
         let weak = self.weak();
         glib::spawn_future_local(async move {
             for id in ids {
@@ -1055,6 +1319,140 @@ impl Window {
                 w.refresh();
             }
         });
+    }
+
+    /// Resume all, keeping to the queue: unfinished torrents wait for a slot, finished ones seed.
+    fn resume_all(self: &Rc<Self>) {
+        let mut seeders = Vec::new();
+        {
+            let mut cfg = self.config.borrow_mut();
+            for i in self.all_items() {
+                let state = i.state();
+                if state.is_running() {
+                    continue;
+                }
+                if i.with_row(|r| r.size > 0 && r.done >= r.size) {
+                    seeders.push(i);
+                } else {
+                    cfg.torrents.entry(i.hash()).or_default().queued = true;
+                }
+            }
+            cfg.save();
+        }
+        self.set_paused(seeders, false);
+        self.apply_rules();
+        self.refresh();
+    }
+
+    /// The rules on top of the engine: alternative speed limits, per-torrent limits, seeding time and
+    /// goals, and the download queue.
+    fn apply_rules(self: &Rc<Self>) {
+        let Some(engine) = self.engine() else { return };
+        if engine.is_demo() {
+            return;
+        }
+        // Alternative limits, by hand or on schedule.
+        let now = glib::DateTime::now_local().ok();
+        let (alt, limits) = {
+            let c = self.config.borrow();
+            let (weekday, minute) = now
+                .as_ref()
+                .map(|d| ((d.day_of_week() - 1) as u32, (d.hour() * 60 + d.minute()) as u32))
+                .unwrap_or((0, 0));
+            let alt = crate::policy::alt_active(c.alt_enabled, c.alt_scheduled, c.alt_from, c.alt_to, c.alt_days, weekday, minute);
+            (alt, if alt { (c.alt_down_kbps, c.alt_up_kbps) } else { (c.down_limit_kbps, c.up_limit_kbps) })
+        };
+        if self.applied_limits.get() != Some(limits) {
+            engine.set_limits(limits.0, limits.1);
+            self.applied_limits.set(Some(limits));
+        }
+        let tip = if alt {
+            format!("Alternative speed limits on: {} down, {} up", crate::format::limit(limits.0), crate::format::limit(limits.1))
+        } else {
+            "Alternative speed limits".to_string()
+        };
+        self.alt_btn.set_tooltip_text(Some(&tip));
+        if alt {
+            self.alt_btn.add_css_class("alt-on");
+        } else {
+            self.alt_btn.remove_css_class("alt-on");
+        }
+
+        let items: Vec<TorrentItem> = self.all_items();
+        self.starting.borrow_mut().retain(|_, t| t.elapsed() < Duration::from_secs(10));
+        let mut stop = Vec::new();
+        let mut queue_items = Vec::new();
+        let tick_secs = 1;
+        {
+            let mut cfg = self.config.borrow_mut();
+            let global_goal = cfg.goal;
+            for i in &items {
+                let row = i.row();
+                let meta = cfg.torrents.entry(row.hash.clone()).or_default();
+                let complete = row.size > 0 && row.done >= row.size;
+                if complete {
+                    meta.forced = false;
+                    meta.queued = false;
+                }
+                if row.state == State::Seeding {
+                    meta.seed_secs += tick_secs;
+                    if !meta.goal_ignored
+                        && crate::policy::goal_reached(meta.goal, global_goal, row.uploaded, row.size, meta.seed_secs)
+                    {
+                        stop.push(row.id);
+                    }
+                }
+                if matches!(row.state, State::Downloading | State::Seeding) {
+                    self.starting.borrow_mut().remove(&row.hash);
+                }
+                engine.set_torrent_limits(row.id, meta.down_limit_kbps, meta.up_limit_kbps);
+                if meta.priorities.iter().any(|&p| p != 1) {
+                    // High files first, then normal, then low; each in file order.
+                    let mut order: Vec<usize> = Vec::with_capacity(meta.priorities.len());
+                    for want in [2u8, 1, 0] {
+                        order.extend(meta.priorities.iter().enumerate().filter(|(_, p)| **p == want).map(|(i, _)| i));
+                    }
+                    engine.set_file_order(row.id, &order);
+                }
+                queue_items.push(crate::policy::QueueItem {
+                    hash: row.hash.clone(),
+                    order: i.order(),
+                    state: row.state,
+                    complete,
+                    queued: meta.queued,
+                    forced: meta.forced,
+                    starting: self.starting.borrow().contains_key(&row.hash),
+                });
+            }
+            let plan = crate::policy::plan_queue(&queue_items, cfg.queue_limit);
+            let by_hash: HashMap<String, usize> = items.iter().map(|i| (i.hash(), i.id())).collect();
+            let mut pause_ids = Vec::new();
+            let mut start_ids = Vec::new();
+            for h in &plan.to_queue {
+                cfg.torrents.entry(h.clone()).or_default().queued = true;
+                pause_ids.extend(by_hash.get(h).copied());
+            }
+            for h in &plan.to_start {
+                cfg.torrents.entry(h.clone()).or_default().queued = false;
+                self.starting.borrow_mut().insert(h.clone(), std::time::Instant::now());
+                start_ids.extend(by_hash.get(h).copied());
+            }
+            let changed = !pause_ids.is_empty() || !start_ids.is_empty() || !stop.is_empty();
+            if changed || self.ticks.get().is_multiple_of(30) {
+                cfg.save();
+            }
+            if changed {
+                pause_ids.extend(stop);
+                glib::spawn_future_local(async move {
+                    for id in pause_ids {
+                        let _ = engine.pause(id).await;
+                    }
+                    for id in start_ids {
+                        let _ = engine.resume(id).await;
+                    }
+                });
+            }
+        }
     }
 
     pub fn remove(self: &Rc<Self>, items: Vec<TorrentItem>, delete_files: bool) {
@@ -1214,7 +1612,10 @@ impl Window {
                 .map(|(i, h)| (h.clone(), i as u32))
                 .collect();
 
-            for row in rows {
+            let (mut total_down, mut total_up) = (0u64, 0u64);
+            for mut row in rows {
+                total_down += row.down_bps;
+                total_up += row.up_bps;
                 let hash = row.hash.clone();
                 let meta = cfg.torrents.entry(hash.clone()).or_insert_with(|| {
                     config_dirty = true;
@@ -1223,6 +1624,9 @@ impl Window {
                         ..Default::default()
                     }
                 });
+                if meta.queued && row.state == State::Paused {
+                    row.state = State::Queued;
+                }
                 let label = meta.label.clone();
                 let color = label
                     .as_ref()
@@ -1259,6 +1663,16 @@ impl Window {
                         self.store.append(&item);
                         items.insert(hash, item);
                     }
+                }
+            }
+
+            let totals = format!("↓ {}   ↑ {}", crate::format::speed(total_down), crate::format::speed(total_up));
+            if self.totals.label() != totals {
+                self.totals.set_label(&totals);
+                if let Some(tray) = self.tray.borrow().clone()
+                    && let Some((_, rt)) = engine.api()
+                {
+                    rt.spawn(async move { tray.update(|t| t.status = totals).await });
                 }
             }
 

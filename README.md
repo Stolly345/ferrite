@@ -15,7 +15,8 @@ is paused, **red** is an error, and every colour comes with a status word. Witho
 own orange — as in these pictures.
 
 - **Interface:** GTK 4 + libadwaita, through [gtk4-rs](https://gtk-rs.org)
-- **Engine:** [librqbit](https://github.com/ikatson/rqbit), a BitTorrent engine written in Rust: DHT, trackers,
+- **Engine:** [librqbit](https://github.com/ikatson/rqbit), a BitTorrent engine written in Rust, extended in
+  `vendor/librqbit` with protocol encryption, web seeds, file priorities and peer bans: DHT, trackers,
   µTP, UPnP, fast resume
 - **No ads, no telemetry, no account.** Apache-2.0.
 
@@ -86,7 +87,24 @@ simulated transfers, no network.</sub>
 - **The details band:** the selected torrent's progress, speeds and time left set large, a piece strip, transfer
   facts, files, peers, trackers and the speed graph
 - **Work on many at once:** pause, resume, label, reorder or remove a selection; a right-click menu on every row
-- **Limits and networking:** global download and upload limits, listening port, UPnP
+- **Keeps seeding with the window closed,** from a tray icon (Show, Pause all, Resume all, Quit)
+- **A download queue:** a few at a time (3 by default), the rest wait in # order; seeding takes no slot; *Start now*
+  runs one at once
+- **Seeding goals:** stop at a share ratio or after a seeding time — globally or per torrent
+- **Per-torrent options:** download and upload limits, its own seeding goal, and its trackers (add or remove)
+- **Move data** to another folder or drive, and **verify** files against the torrent at any time
+- **File priorities** (High, Normal, Low) and per-file skipping, even mid-download
+- **Play while downloading:** videos and songs stream to your player (VLC, mpv, Celluloid…) as the pieces arrive
+- **Alternative speed limits,** switched from the toolbar or on a schedule (hours and days)
+- **Watch folder:** every `.torrent` dropped there is added on its own
+- **RSS feeds:** new items whose title matches a filter are added automatically (Torznab magnets included)
+- **Create torrents** from a file or folder — public or private — and start seeding them
+- **Remote control:** a web interface and API, password protected, on this computer or your network
+- **Networking:** protocol encryption (prefer, require or off), UPnP and NAT-PMP port forwarding, SOCKS5 proxy,
+  IP blocklist, binding to one network interface (a VPN's), peers per torrent, and banning peers
+- **Web seeds:** torrents that list HTTP mirrors download from them as well as from peers
+- **Peers in detail:** address, client, how much of the torrent they have, speeds, connection flags
+- **Total speeds** in the title bar
 - **Problems in plain words** — "Disk is full — make room, then resume" — and fixed by resuming
 - **Notifications** when a download completes
 - **Picks up where it left off** after a restart; paused torrents stay paused
@@ -122,8 +140,18 @@ cargo install cargo-deb   # once
 cargo deb
 ```
 
-`cargo test` runs the unit tests and an offline round trip through the real engine: create a torrent, add it,
-verify it, pause, resume, remove.
+`cargo test` runs offline: the unit tests, round trips through the real engine (add, verify, pause, resume,
+remove, move data, edit trackers, private torrents), a web-seed-only download from a local HTTP server, and a small
+swarm on this computer where one engine downloads from another with encryption required and a third, having
+banned the address, gets nothing.
+
+Two more tests check compatibility with libtorrent (the engine of qBittorrent and Deluge) with encryption forced
+both ways; they need another client running and are skipped unless asked for:
+
+```sh
+FERRITE_INTEROP_DIR=… FERRITE_INTEROP_PEER=127.0.0.1:6881 cargo test interop_download_encrypted -- --ignored
+FERRITE_INTEROP_DIR=… cargo test interop_seed_encrypted -- --ignored
+```
 
 ## Keyboard
 
@@ -157,6 +185,7 @@ desktop accent (as the pictures here do).
 |---|---|
 | Settings, labels, order | `~/.config/ferrite/settings.json` |
 | Engine resume data | `~/.local/share/ferrite/session/` |
+| A separate profile (tests, a second setup) | `FERRITE_HOME=/some/dir ferrite` |
 | Downloads | `~/Downloads` (change in Settings) |
 
 ## Code
@@ -164,6 +193,11 @@ desktop accent (as the pictures here do).
 | File | Role |
 |---|---|
 | `src/engine.rs` | librqbit wrapper and the demo engine; plain snapshots for the UI |
+| `src/policy.rs` | The queue, seeding goals and speed schedule, as pure tested functions |
+| `src/tray.rs`, `src/watch.rs`, `src/feeds.rs` | Tray icon, watch folder, RSS feeds |
+| `src/server.rs`, `src/natpmp.rs` | HTTP server (streaming, remote control), NAT-PMP port mapping |
+| `src/ui/options.rs`, `src/ui/play.rs`, `src/ui/create.rs` | Torrent options, move, verify; play; create torrent |
+| `vendor/librqbit/` | The engine with Ferrite's patches, each listed in `FERRITE-PATCHES.md` |
 | `src/item.rs` | One table row as a GObject the cells bind to |
 | `src/ui/window.rs` | Window, side pane, toolbar, table, refresh loop, commands |
 | `src/ui/details.rs` | The details band and its tabs |
@@ -176,9 +210,8 @@ desktop accent (as the pictures here do).
 
 ## Roadmap
 
-A download queue (a few at a time), per-torrent speed limits, play while downloading, shut down or sleep after
-downloads finish, keep seeding in the background with the window closed, translations, Flatpak. The full plan is in
-the [product requirements](docs/PRD.md).
+BitTorrent v2-only torrents (hybrid v1 + v2 torrents already work), "when downloads finish" actions (sleep, shut
+down), translations, Flatpak. The full plan is in the [product requirements](docs/PRD.md).
 
 ## Credits
 

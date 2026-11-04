@@ -1,3 +1,5 @@
 /target
 /.impeccable
 /.hallmark
+/vendor/librqbit/webui/node_modules
+/vendor/librqbit/webui/dist/.vite

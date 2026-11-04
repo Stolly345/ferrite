@@ -26,6 +26,8 @@ pub enum State {
     Seeding,
     Done,
     Paused,
+    /// Waiting for a free download slot (Ferrite's queue pauses it in the engine).
+    Queued,
     Error,
 }
 
@@ -38,6 +40,7 @@ impl State {
             State::Seeding => "Seeding",
             State::Done => "Done",
             State::Paused => "Paused",
+            State::Queued => "Queued",
             State::Error => "Error",
         }
     }
@@ -47,7 +50,7 @@ impl State {
         match self {
             State::GettingFileList | State::Checking | State::Downloading => "downloading",
             State::Seeding => "seeding",
-            State::Done | State::Paused => "inactive",
+            State::Done | State::Paused | State::Queued => "inactive",
             State::Error => "error",
         }
     }
@@ -120,6 +123,8 @@ pub struct FileRow {
 pub struct PeerRow {
     pub addr: String,
     pub client: String,
+    /// Share of the torrent the peer has (0–1), when known.
+    pub progress: Option<f64>,
     pub down_bps: u64,
     pub up_bps: u64,
     pub flags: String,
@@ -147,6 +152,49 @@ pub struct AddOptions {
     pub paused: bool,
 }
 
+/// What Ferrite needs to add a torrent again: after moving its data, editing its trackers, or to
+/// verify its files from scratch.
+#[derive(Clone)]
+pub struct TorrentInfo {
+    /// The original .torrent file.
+    pub torrent: Vec<u8>,
+    /// The bencoded info dictionary, byte for byte (its hash is the info hash).
+    pub info: Vec<u8>,
+    pub folder: PathBuf,
+    pub only_files: Option<Vec<usize>>,
+    pub paused: bool,
+    pub multi_file: bool,
+    /// Every file's path inside the torrent folder.
+    pub files: Vec<PathBuf>,
+}
+
+/// Builds a .torrent around an unchanged info dictionary with the given trackers. Keys are written
+/// in sorted order (announce, announce-list, info), as bencode requires.
+pub fn torrent_with_trackers(info: &[u8], trackers: &[String]) -> Vec<u8> {
+    fn bytes(out: &mut Vec<u8>, b: &[u8]) {
+        out.extend_from_slice(b.len().to_string().as_bytes());
+        out.push(b':');
+        out.extend_from_slice(b);
+    }
+    let mut out = b"d".to_vec();
+    if let Some(first) = trackers.first() {
+        bytes(&mut out, b"announce");
+        bytes(&mut out, first.as_bytes());
+        bytes(&mut out, b"announce-list");
+        out.push(b'l');
+        for t in trackers {
+            out.push(b'l');
+            bytes(&mut out, t.as_bytes());
+            out.push(b'e');
+        }
+        out.push(b'e');
+    }
+    bytes(&mut out, b"info");
+    out.extend_from_slice(info);
+    out.push(b'e');
+    out
+}
+
 pub enum Engine {
     Real(Real),
     Demo(RefCell<Demo>),
@@ -157,6 +205,8 @@ pub struct Real {
     rt: tokio::runtime::Handle,
     /// Previous byte counters of each peer, to derive per-peer speeds.
     peer_prev: Mutex<HashMap<String, (u64, u64, Instant)>>,
+    /// One add at a time: librqbit can take simultaneous adds for duplicates.
+    add_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 pub struct EngineOptions {
@@ -169,6 +219,14 @@ pub struct EngineOptions {
     pub upnp: bool,
     pub down_limit_kbps: u32,
     pub up_limit_kbps: u32,
+    /// socks5://[user:pass@]host:port for every outgoing peer connection.
+    pub proxy_url: Option<String>,
+    /// A list of IP ranges to refuse (P2P / eMule format), by URL or file path.
+    pub blocklist_url: Option<String>,
+    /// Bind all traffic to this network interface (a VPN's, say), so nothing leaks if it drops.
+    pub bind_device: Option<String>,
+    /// Most peers connected per torrent.
+    pub peer_limit: Option<usize>,
 }
 
 fn bps(kbps: u32) -> Option<NonZeroU32> {
@@ -196,6 +254,13 @@ impl Engine {
                 upload_bps: bps(opts.up_limit_kbps),
             },
             client_name_and_version: Some(format!("Ferrite {}", env!("CARGO_PKG_VERSION"))),
+            connect: opts.proxy_url.clone().filter(|p| !p.trim().is_empty()).map(|p| librqbit::ConnectionOptions {
+                proxy_url: Some(p.trim().to_string()),
+                ..Default::default()
+            }),
+            blocklist_url: opts.blocklist_url.clone().filter(|b| !b.trim().is_empty()),
+            bind_device_name: opts.bind_device.clone().filter(|d| !d.trim().is_empty()),
+            peer_limit: opts.peer_limit.filter(|&n| n > 0),
             ..Default::default()
         };
         let dir = opts.download_dir.clone();
@@ -205,9 +270,10 @@ impl Engine {
             .context("engine task failed")?
             .context("couldn't start the torrent engine")?;
         Ok(Engine::Real(Real {
-            api: Api::new(session, None),
+            api: Api::new(session, None, None),
             rt,
             peer_prev: Mutex::new(HashMap::new()),
+            add_lock: Default::default(),
         }))
     }
 
@@ -247,7 +313,9 @@ impl Engine {
             bail!("Adding torrents is off in the demo");
         };
         let api = r.api.clone();
+        let lock = r.add_lock.clone();
         r.rt.spawn(async move {
+            let _one_at_a_time = lock.lock().await;
             let add = source.into_add()?;
             let opts = AddTorrentOptions {
                 list_only: true,
@@ -287,7 +355,9 @@ impl Engine {
             bail!("Adding torrents is off in the demo");
         };
         let api = r.api.clone();
+        let lock = r.add_lock.clone();
         r.rt.spawn(async move {
+            let _one_at_a_time = lock.lock().await;
             let add_opts = AddTorrentOptions {
                 paused: opts.paused,
                 only_files: opts.only_files,
@@ -376,6 +446,168 @@ impl Engine {
         }
     }
 
+    /// This torrent's own speed limits (0 = none), applied while it runs. Returns false when the
+    /// torrent isn't running; Ferrite applies them again once it is.
+    pub fn set_torrent_limits(&self, id: usize, down_kbps: u32, up_kbps: u32) -> bool {
+        let Engine::Real(r) = self else { return true };
+        let Some(live) = r.api.session().get(id.into()).and_then(|h| h.live()) else { return false };
+        let limits = live.ratelimits();
+        let (down, up) = (bps(down_kbps), bps(up_kbps));
+        if limits.get_download_bps() != down {
+            limits.set_download_bps(down);
+        }
+        if limits.get_upload_bps() != up {
+            limits.set_upload_bps(up);
+        }
+        true
+    }
+
+    pub fn torrent_info(&self, id: usize) -> Option<TorrentInfo> {
+        let Engine::Real(r) = self else { return None };
+        let handle = r.api.session().get(id.into())?;
+        let meta = handle.metadata.load();
+        let meta = meta.as_ref()?;
+        let details = r.api.api_torrent_details(id.into()).ok()?;
+        let files: Vec<PathBuf> = meta.file_infos.iter().map(|f| f.relative_filename.clone()).collect();
+        Some(TorrentInfo {
+            torrent: meta.torrent_bytes.to_vec(),
+            info: meta.info_bytes.to_vec(),
+            folder: PathBuf::from(details.output_folder),
+            only_files: handle.only_files(),
+            paused: handle.is_paused(),
+            multi_file: files.len() > 1,
+            files,
+        })
+    }
+
+    /// Forgets a torrent (keeping its files) and adds it again from `info` with the given torrent
+    /// bytes and folder. The engine then checks the files on disk from scratch.
+    async fn readd(&self, id: usize, info: TorrentInfo, torrent: Vec<u8>, folder: PathBuf) -> Result<()> {
+        let Engine::Real(r) = self else { return Ok(()) };
+        let api = r.api.clone();
+        r.rt.spawn(async move {
+            api.api_torrent_action_forget(id.into()).await.map_err(|e| anyhow!("{e}"))?;
+            let opts = AddTorrentOptions {
+                paused: info.paused,
+                only_files: info.only_files,
+                output_folder: Some(folder.to_string_lossy().into_owned()),
+                overwrite: true,
+                ..Default::default()
+            };
+            api.session()
+                .add_torrent(AddTorrent::from_bytes(torrent), Some(opts))
+                .await
+                .map(drop)
+        })
+        .await?
+    }
+
+    /// Checks every piece on disk again.
+    pub async fn verify(&self, id: usize) -> Result<()> {
+        let info = self.torrent_info(id).context("The torrent's details aren't known yet")?;
+        let (torrent, folder) = (info.torrent.clone(), info.folder.clone());
+        self.readd(id, info, torrent, folder).await
+    }
+
+    /// Replaces the torrent's trackers (keeps the info hash: only the outer .torrent changes).
+    pub async fn set_trackers(&self, id: usize, trackers: Vec<String>) -> Result<()> {
+        let info = self.torrent_info(id).context("The torrent's details aren't known yet")?;
+        let torrent = torrent_with_trackers(&info.info, &trackers);
+        let folder = info.folder.clone();
+        self.readd(id, info, torrent, folder).await
+    }
+
+    /// Moves the downloaded files under `dest` and continues from there.
+    pub async fn move_data(&self, id: usize, dest: PathBuf) -> Result<()> {
+        let Engine::Real(r) = self else { bail!("Moving data is off in the demo") };
+        let info = self.torrent_info(id).context("The torrent's details aren't known yet")?;
+        // A multi-file torrent keeps its own folder name inside the destination.
+        let new_folder = match (info.multi_file, info.folder.file_name()) {
+            (true, Some(name)) => dest.join(name),
+            _ => dest,
+        };
+        if new_folder == info.folder {
+            return Ok(());
+        }
+        self.pause(id).await.ok();
+        let (from, to, files) = (info.folder.clone(), new_folder.clone(), info.files.clone());
+        r.rt
+            .spawn_blocking(move || move_files(&from, &to, &files))
+            .await
+            .context("move task failed")??;
+        let torrent = info.torrent.clone();
+        self.readd(id, info, torrent, new_folder).await
+    }
+
+    /// Makes a .torrent from a file or folder.
+    pub async fn create_torrent(&self, path: PathBuf, trackers: Vec<String>, private: bool) -> Result<Vec<u8>> {
+        let Engine::Real(r) = self else { bail!("Creating torrents is off in the demo") };
+        r.rt.spawn(async move {
+            let spawner = librqbit::spawn_utils::BlockingSpawner::new(2);
+            let created = librqbit::create_torrent(
+                &path,
+                librqbit::CreateTorrentOptions { name: None, trackers, piece_length: None },
+                &spawner,
+            )
+            .await?;
+            let bytes = created.as_bytes()?.to_vec();
+            if !private {
+                return Ok(bytes);
+            }
+            // Mark it private (BEP 27): no DHT or peer exchange, trackers only. The flag lives in the
+            // info dictionary, so it is added before the hash is ever computed by a client.
+            Ok(make_private(&bytes).unwrap_or(bytes))
+        })
+        .await?
+    }
+
+    /// Downloads files in this order (file indices, first = soonest). Returns false when the
+    /// torrent isn't running; Ferrite applies it again once it is.
+    pub fn set_file_order(&self, id: usize, order: &[usize]) -> bool {
+        let Engine::Real(r) = self else { return true };
+        let Some(live) = r.api.session().get(id.into()).and_then(|h| h.live()) else { return false };
+        if live.file_priorities().starts_with(order) {
+            return true;
+        }
+        live.set_file_priorities(order);
+        true
+    }
+
+    /// Refuses this address from now on and disconnects it everywhere.
+    pub fn ban(&self, ip: std::net::IpAddr) {
+        let Engine::Real(r) = self else { return };
+        r.api.session().banned.write().insert(ip);
+        r.api.session().with_torrents(|it| {
+            for (_, h) in it {
+                if let Some(live) = h.live() {
+                    live.drop_peers_at(ip);
+                }
+            }
+        });
+    }
+
+    pub fn clear_bans(&self) {
+        if let Engine::Real(r) = self {
+            r.api.session().banned.write().clear();
+        }
+    }
+
+    /// The port peers reach this engine on.
+    pub fn listen_port(&self) -> Option<u16> {
+        match self {
+            Engine::Real(r) => r.api.session().announce_port(),
+            Engine::Demo(_) => None,
+        }
+    }
+
+    /// The engine's API, for the HTTP server (streaming, remote control).
+    pub fn api(&self) -> Option<(Api, tokio::runtime::Handle)> {
+        match self {
+            Engine::Real(r) => Some((r.api.clone(), r.rt.clone())),
+            Engine::Demo(_) => None,
+        }
+    }
+
     pub async fn stop(&self) {
         if let Engine::Real(r) = self {
             let session = r.api.session().clone();
@@ -384,18 +616,71 @@ impl Engine {
     }
 }
 
+/// Moves each file from one torrent folder to another, copying across drives when a rename can't.
+fn move_files(from: &std::path::Path, to: &std::path::Path, files: &[PathBuf]) -> Result<()> {
+    for rel in files {
+        let (src, dst) = (from.join(rel), to.join(rel));
+        if !src.exists() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).with_context(|| format!("couldn't create {}", parent.display()))?;
+        }
+        if std::fs::rename(&src, &dst).is_err() {
+            std::fs::copy(&src, &dst).with_context(|| format!("couldn't copy {}", src.display()))?;
+            std::fs::remove_file(&src).ok();
+        }
+    }
+    // Tidy up folders the move left empty.
+    for rel in files {
+        let mut dir = from.join(rel).parent().map(|p| p.to_path_buf());
+        while let Some(d) = dir {
+            if d == from.parent().unwrap_or(from) || std::fs::remove_dir(&d).is_err() {
+                break;
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+/// Adds `7:privatei1e` to a .torrent's info dictionary (keys stay sorted: "private" sorts after
+/// "pieces" and the other keys librqbit writes, so it goes right before the dictionary's end).
+fn make_private(torrent: &[u8]) -> Option<Vec<u8>> {
+    let pos = torrent.windows(6).position(|w| w == b"4:info")? + 6;
+    let (_, rest) = librqbit_bencode::from_bytes_with_rest::<librqbit_bencode::BencodeValue<librqbit_bencode::ByteBuf>>(&torrent[pos..]).ok()?;
+    let info_end = torrent.len() - rest.len();
+    let mut out = torrent[..info_end - 1].to_vec();
+    out.extend_from_slice(b"7:privatei1e");
+    out.extend_from_slice(&torrent[info_end - 1..]);
+    Some(out)
+}
+
 pub enum Source {
     Url(String),
     File(PathBuf),
 }
 
+const V2_ONLY: &str = "This is a BitTorrent v2-only torrent, which Ferrite can't open yet. \
+Hybrid (v1 + v2) and v1 torrents work — look for one of those.";
+
 impl Source {
     fn into_add(self) -> Result<AddTorrent<'static>> {
         Ok(match self {
-            Source::Url(u) => AddTorrent::from_url(u),
-            Source::File(p) => AddTorrent::from_bytes(
-                std::fs::read(&p).with_context(|| format!("couldn't read {}", p.display()))?,
-            ),
+            Source::Url(u) => {
+                if u.starts_with("magnet:") && u.contains("urn:btmh:") && !u.contains("urn:btih:") {
+                    bail!(V2_ONLY);
+                }
+                AddTorrent::from_url(u)
+            }
+            Source::File(p) => {
+                let bytes = std::fs::read(&p).with_context(|| format!("couldn't read {}", p.display()))?;
+                let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+                if has(b"9:file tree") && !has(b"6:pieces") {
+                    bail!(V2_ONLY);
+                }
+                AddTorrent::from_bytes(bytes)
+            }
         })
     }
 }
@@ -469,6 +754,14 @@ impl Real {
             .ok()
             .map(|(bf, len)| bf.iter().take(len as usize).map(|b| *b).collect());
 
+        let d_total_pieces = self
+            .api
+            .api_torrent_list()
+            .torrents
+            .into_iter()
+            .find(|t| t.id == Some(id))
+            .map(|t| t.total_pieces)
+            .unwrap_or(0);
         let now = Instant::now();
         let mut prev = self.peer_prev.lock().unwrap();
         let mut peers: Vec<PeerRow> = self
@@ -501,6 +794,7 @@ impl Real {
                     }
                 }
                 PeerRow {
+                    progress: p.have_pieces.filter(|_| d_total_pieces > 0).map(|h| (h as f64 / d_total_pieces as f64).min(1.0)),
                     addr,
                     client: p.client_name.clone().unwrap_or_default(),
                     down_bps,
@@ -674,6 +968,7 @@ impl Demo {
                 .map(|i| {
                     let share = 1.0 / (i as f64 + 2.0);
                     PeerRow {
+                        progress: Some(if i % 3 == 1 { 0.35 + i as f64 * 0.04 } else { 1.0 }),
                         addr: format!("203.0.113.{}:{}", 20 + i * 9, 20000 + i * 1733),
                         client: clients[i % clients.len()].to_string(),
                         down_bps: (r.down_bps as f64 * share) as u64,
@@ -746,6 +1041,10 @@ mod tests {
                 upnp: false,
                 down_limit_kbps: 0,
                 up_limit_kbps: 0,
+                proxy_url: None,
+                blocklist_url: None,
+                bind_device: None,
+                peer_limit: None,
             },
         )
         .await
@@ -785,6 +1084,301 @@ mod tests {
         engine.remove(row.id, false).await.unwrap();
         assert!(engine.list().is_empty());
         assert!(file.exists(), "removing without deleting keeps the files");
+
+        engine.stop().await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn offline_opts(root: &std::path::Path, name: &str) -> EngineOptions {
+        EngineOptions {
+            download_dir: root.join(name).join("downloads"),
+            session_dir: root.join(name).join("session"),
+            offline: true,
+            port: 0,
+            upnp: false,
+            down_limit_kbps: 0,
+            up_limit_kbps: 0,
+            proxy_url: None,
+            blocklist_url: None,
+            bind_device: None,
+            peer_limit: None,
+        }
+    }
+
+    /// Adds a torrent pointing straight at a known peer (no trackers or DHT in these tests).
+    async fn add_from_peer(engine: &Engine, torrent: Vec<u8>, folder: PathBuf, peer: std::net::SocketAddr) {
+        let (api, rt) = engine.api().unwrap();
+        rt.spawn(async move {
+            let opts = AddTorrentOptions {
+                output_folder: Some(folder.to_string_lossy().into_owned()),
+                initial_peers: Some(vec![peer]),
+                overwrite: true,
+                ..Default::default()
+            };
+            api.session().add_torrent(AddTorrent::from_bytes(torrent), Some(opts)).await.map(drop)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    /// Two engines on this machine: B downloads from A for real; B sees A's progress; a third
+    /// engine that banned the address gets nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_transfer_peer_progress_and_ban() {
+        let root = std::env::temp_dir().join(format!("ferrite-swarm-{}", std::process::id()));
+        let seed_dir = root.join("seed");
+        std::fs::create_dir_all(&seed_dir).unwrap();
+        let file = seed_dir.join("swarm.bin");
+        let content: Vec<u8> = (0..3_000_000u32).map(|i| (i.wrapping_mul(2246822519) >> 11) as u8).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        // Require encryption both ways: plaintext can't be a silent fallback, so a finished
+        // transfer proves the MSE handshake and the RC4 streams work.
+        librqbit::mse::set_mode(librqbit::mse::Mode::Require);
+        let handle = tokio::runtime::Handle::current();
+        let a = Engine::start(handle.clone(), offline_opts(&root, "a")).await.unwrap();
+        let torrent = a.create_torrent(file.clone(), vec![], false).await.unwrap();
+        a.add(torrent.clone(), AddOptions { folder: seed_dir.clone(), only_files: None, paused: false }).await.unwrap();
+        wait_for(&a, State::Seeding).await;
+        let port = a.api().unwrap().0.session().announce_port().expect("A listens");
+        let peer_a: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+
+        // B downloads it from A.
+        let b = Engine::start(handle.clone(), offline_opts(&root, "b")).await.unwrap();
+        let b_dir = root.join("b-files");
+        b.set_limits(400, 0); // slow enough to watch the peer mid-transfer
+        add_from_peer(&b, torrent.clone(), b_dir.clone(), peer_a).await;
+        let mut saw_seeder = false;
+        for _ in 0..300 {
+            let row = b.list().into_iter().next().unwrap();
+            if let Some(d) = b.details(row.id) {
+                saw_seeder |= d.peers.iter().any(|p| p.progress == Some(1.0));
+            }
+            if row.state == State::Seeding {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(b.list()[0].state, State::Seeding, "B should finish downloading from A");
+        assert_eq!(std::fs::read(b_dir.join("swarm.bin")).unwrap(), content);
+        assert!(saw_seeder, "B should see A as a peer with the whole torrent");
+        let id = b.list()[0].id;
+        assert!(b.set_file_order(id, &[0]));
+
+        // C has banned 127.0.0.1: it never gets a byte.
+        let c = Engine::start(handle, offline_opts(&root, "c")).await.unwrap();
+        c.ban(std::net::Ipv4Addr::LOCALHOST.into());
+        add_from_peer(&c, torrent, root.join("c-files"), peer_a).await;
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let row = c.list().into_iter().next().unwrap();
+        assert_eq!(row.done, 0, "a banned peer must not be used: {row:?}");
+
+        for e in [a, b, c] {
+            e.stop().await;
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A minimal HTTP server with Range support, serving one file at every path.
+    async fn range_server(body: Vec<u8>) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = std::sync::Arc::new(body);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let mut req = Vec::new();
+                        let mut buf = [0u8; 1024];
+                        while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match sock.read(&mut buf).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => req.extend_from_slice(&buf[..n]),
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&req).to_lowercase();
+                        let range = text.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| {
+                            let (a, b) = r.trim().split_once('-')?;
+                            Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+                        });
+                        let (status, slice) = match range {
+                            Some((a, b)) => ("206 Partial Content", &body[a..=b.min(body.len() - 1)]),
+                            None => ("200 OK", &body[..]),
+                        };
+                        let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n", slice.len());
+                        if sock.write_all(head.as_bytes()).await.is_err() || sock.write_all(slice).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// A torrent whose only source is a web seed downloads completely, with no peers at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn web_seed_only_download() {
+        use sha1::{Digest, Sha1};
+        let root = std::env::temp_dir().join(format!("ferrite-webseed-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let content: Vec<u8> = (0..1_300_000u32).map(|i| (i.wrapping_mul(97) ^ (i >> 7)) as u8).collect();
+        let addr = range_server(content.clone()).await;
+
+        // A single-file torrent with url-list = the server.
+        let piece_len = 262_144usize;
+        let mut pieces = Vec::new();
+        for chunk in content.chunks(piece_len) {
+            pieces.extend_from_slice(&Sha1::digest(chunk));
+        }
+        let bstr = |b: &[u8]| [b.len().to_string().as_bytes(), b":", b].concat();
+        let info = [
+            b"d6:lengthi".to_vec(),
+            content.len().to_string().into_bytes(),
+            b"e4:name".to_vec(),
+            bstr(b"seed.bin"),
+            b"12:piece lengthi".to_vec(),
+            piece_len.to_string().into_bytes(),
+            b"e6:pieces".to_vec(),
+            bstr(&pieces),
+            b"e".to_vec(),
+        ]
+        .concat();
+        let url = format!("http://{addr}/files/seed.bin");
+        let torrent = [b"d4:info".to_vec(), info, b"8:url-list".to_vec(), bstr(url.as_bytes()), b"e".to_vec()].concat();
+
+        let engine = Engine::start(tokio::runtime::Handle::current(), offline_opts(&root, "w")).await.unwrap();
+        let folder = root.join("out");
+        engine.add(torrent, AddOptions { folder: folder.clone(), only_files: None, paused: false }).await.unwrap();
+        let row = wait_for(&engine, State::Seeding).await;
+        assert_eq!(row.done, content.len() as u64);
+        assert_eq!(std::fs::read(folder.join("seed.bin")).unwrap(), content);
+        engine.stop().await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Interop with another client (run by hand: see the README). Ferrite downloads, encryption
+    /// required, from a peer at FERRITE_INTEROP_PEER using FERRITE_INTEROP_DIR/interop.torrent.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn interop_download_encrypted() {
+        let dir = PathBuf::from(std::env::var("FERRITE_INTEROP_DIR").unwrap());
+        let peer: std::net::SocketAddr = std::env::var("FERRITE_INTEROP_PEER").unwrap().parse().unwrap();
+        librqbit::mse::set_mode(librqbit::mse::Mode::Require);
+        let engine = Engine::start(tokio::runtime::Handle::current(), offline_opts(&dir, "ferrite-dl")).await.unwrap();
+        let out = dir.join("ferrite-out");
+        add_from_peer(&engine, std::fs::read(dir.join("interop.torrent")).unwrap(), out.clone(), peer).await;
+        let row = wait_row(&engine, |r| r.state == State::Seeding).await;
+        assert_eq!(std::fs::read(out.join("data.bin")).unwrap(), std::fs::read(dir.join("data.bin")).unwrap());
+        eprintln!("interop download ok: {} bytes", row.size);
+        engine.stop().await;
+    }
+
+    /// Interop: Ferrite seeds FERRITE_INTEROP_DIR/data.bin (encryption required), writes its port
+    /// to port.txt and waits for the other client to write `done`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn interop_seed_encrypted() {
+        let dir = PathBuf::from(std::env::var("FERRITE_INTEROP_DIR").unwrap());
+        librqbit::mse::set_mode(librqbit::mse::Mode::Require);
+        let engine = Engine::start(tokio::runtime::Handle::current(), offline_opts(&dir, "ferrite-seed")).await.unwrap();
+        let torrent = std::fs::read(dir.join("interop.torrent")).unwrap();
+        engine.add(torrent, AddOptions { folder: dir.clone(), only_files: None, paused: false }).await.unwrap();
+        wait_for(&engine, State::Seeding).await;
+        std::fs::write(dir.join("port.txt"), engine.listen_port().unwrap().to_string()).unwrap();
+        for _ in 0..900 {
+            if dir.join("done").exists() {
+                eprintln!("interop seed ok");
+                engine.stop().await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("the other client never finished downloading from Ferrite");
+    }
+
+    async fn wait_row(engine: &Engine, f: impl Fn(&TorrentRow) -> bool) -> TorrentRow {
+        for _ in 0..150 {
+            if let Some(r) = engine.list().into_iter().find(|r| f(r)) {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        panic!("condition never met: {:?}", engine.list());
+    }
+
+    /// Trackers, moving data, verifying and per-torrent limits through the real engine, offline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn real_engine_manage() {
+        let root = std::env::temp_dir().join(format!("ferrite-manage-{}", std::process::id()));
+        let (data, elsewhere) = (root.join("data"), root.join("elsewhere"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let file = data.join("manage.bin");
+        let content: Vec<u8> = (0..2_000_000u32).map(|i| (i.wrapping_mul(40503) >> 9) as u8).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        let engine = Engine::start(
+            tokio::runtime::Handle::current(),
+            EngineOptions {
+                download_dir: root.join("downloads"),
+                session_dir: root.join("session"),
+                offline: true,
+                port: 0,
+                upnp: false,
+                down_limit_kbps: 0,
+                up_limit_kbps: 0,
+                proxy_url: None,
+                blocklist_url: None,
+                bind_device: None,
+                peer_limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        let torrent = engine.create_torrent(file.clone(), vec![], false).await.unwrap();
+        let private = engine.create_torrent(file.clone(), vec![], true).await.unwrap();
+        assert!(private.windows(12).any(|w| w == b"7:privatei1e"));
+        assert_ne!(torrent, private);
+
+        let hash = engine
+            .add(torrent, AddOptions { folder: data.clone(), only_files: None, paused: false })
+            .await
+            .unwrap();
+        let row = wait_for(&engine, State::Seeding).await;
+
+        // Per-torrent limits apply to a running torrent.
+        assert!(engine.set_torrent_limits(row.id, 100, 50));
+
+        // New trackers keep the info hash, and the torrent seeds again after the re-check.
+        let trackers = vec!["http://tracker.example/announce".to_string(), "udp://other.example:6969/announce".to_string()];
+        engine.set_trackers(row.id, trackers.clone()).await.unwrap();
+        let row = wait_row(&engine, |r| r.hash == hash && r.state == State::Seeding).await;
+        let mut got = engine.details(row.id).unwrap().trackers;
+        got.sort();
+        let mut want = trackers.clone();
+        want.sort();
+        assert_eq!(got, want);
+
+        // Moving the data carries on from the new folder.
+        engine.move_data(row.id, elsewhere.clone()).await.unwrap();
+        assert!(!file.exists() && elsewhere.join("manage.bin").exists());
+        let row = wait_row(&engine, |r| r.hash == hash && r.state == State::Seeding).await;
+        assert_eq!(engine.details(row.id).unwrap().folder, elsewhere);
+
+        // Damage a piece: verifying finds it missing.
+        let moved = elsewhere.join("manage.bin");
+        let mut bytes = std::fs::read(&moved).unwrap();
+        bytes[10] ^= 0xff;
+        std::fs::write(&moved, &bytes).unwrap();
+        engine.pause(row.id).await.unwrap();
+        engine.verify(row.id).await.unwrap();
+        let row = wait_row(&engine, |r| r.hash == hash && r.size > 0 && !matches!(r.state, State::Checking | State::GettingFileList)).await;
+        assert!(row.done < row.size, "verify should notice the damaged piece: {row:?}");
 
         engine.stop().await;
         let _ = std::fs::remove_dir_all(&root);

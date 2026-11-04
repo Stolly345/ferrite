@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Owner | Alexander Stoll |
-| Status | v0.1.0 built; v0.2 planned |
-| Last updated | 3 November 2026 |
+| Status | v0.1.0 + full-client feature set built (unreleased); v0.2 in testing |
+| Last updated | 4 November 2026 |
 | License | Apache-2.0 |
 
 ## 1. Summary
@@ -42,11 +42,9 @@ it is going, find it later and get on with their day — without learning BitTor
 
 ### Non-goals (for 1.0)
 
-- Torrent search or built-in indexers.
-- RSS auto-downloading.
-- A web UI or remote control daemon (may come after 1.0; see §10).
+- Torrent search or built-in indexers (feeds from an indexer such as Jackett or Prowlarr work through RSS).
+- A headless daemon without the desktop app (remote control runs inside the app).
 - Windows or macOS builds.
-- Creating and publishing new torrents from the UI.
 
 ## 4. Users
 
@@ -107,7 +105,25 @@ it is going, find it later and get on with their day — without learning BitTor
 - `--demo` mode: sample torrents with simulated transfers, no network, never touches user settings.
 - Debian package via `cargo deb`.
 
-### 5.2 Planned
+### 5.2 Shipped after v0.1 (4 November 2026)
+
+Tracked against the table below: R1, R2, R3, R4, R5, R6 and R15 are done, plus everything here. Each is covered by
+tests where it can be (see the README).
+
+- **Background seeding** with a tray icon (StatusNotifierItem): Show, Pause all, Resume all, Quit.
+- **Download queue** (R1), **seeding goals** global and per torrent (R4), **per-torrent limits** (R3), **move data**
+  (R5), **verify files**, **edit trackers** (keeps the info hash).
+- **Alternative speed limits** on a toolbar toggle and a schedule; **total speeds** in the title bar.
+- **Watch folder**; **RSS feeds** with regex filters and Torznab magnets (a new feed only marks what's there as seen).
+- **Play while downloading** (R6) through a password-protected local HTTP stream; **create torrents** (public or
+  private) and seed them.
+- **Remote control** (R15): rqbit's web interface and API behind basic auth, local or network-wide.
+- **Networking:** protocol encryption MSE/PE (prefer / require / off — checked against libtorrent both ways), NAT-PMP
+  alongside UPnP, SOCKS5 proxy, IP blocklist, binding to an interface, peers per torrent, banning peers.
+- **Web seeds** (BEP 19), **file priorities**, **peer progress** — engine patches in `vendor/librqbit`.
+- **BitTorrent v2:** hybrid v1 + v2 torrents work; v2-only torrents are refused with a plain explanation.
+
+### 5.3 Planned
 
 Priority: **P0** blocks 1.0, **P1** wanted for 1.0, **P2** after 1.0.
 

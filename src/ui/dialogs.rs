@@ -152,6 +152,18 @@ async fn finish_add(win: &Rc<Window>, preview: Preview, opts: AddOptions) {
     }
 }
 
+/// Adds a torrent with no questions (watch folder, feeds): all files, into the download folder.
+/// Returns its name.
+pub async fn add_without_asking(win: &Rc<Window>, source: Source) -> anyhow::Result<String> {
+    let engine = win.engine().ok_or_else(|| anyhow::anyhow!("The torrent engine isn't ready yet"))?;
+    let preview = engine.preview(source).await?;
+    let name = preview.name.clone();
+    let folder = target_folder(&win.config.borrow().download_dir, &preview);
+    engine.add(preview.torrent, AddOptions { folder, only_files: None, paused: false }).await?;
+    win.refresh();
+    Ok(name)
+}
+
 fn free_space(path: &std::path::Path) -> Option<u64> {
     // The folder may not exist yet: ask about the nearest existing parent.
     let mut p = path.to_path_buf();

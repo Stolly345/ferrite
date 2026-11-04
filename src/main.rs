@@ -5,6 +5,12 @@ mod config;
 mod engine;
 mod format;
 mod item;
+mod feeds;
+mod natpmp;
+mod policy;
+mod server;
+mod tray;
+mod watch;
 mod ui;
 
 use adw::prelude::*;
@@ -27,12 +33,19 @@ fn main() -> glib::ExitCode {
         .expect("couldn't start the async runtime");
     let handle = runtime.handle().clone();
 
+    let separate = std::env::var_os("FERRITE_HOME").is_some();
     let mut flags = gio::ApplicationFlags::HANDLES_OPEN;
-    if demo {
+    if demo || separate {
         flags |= gio::ApplicationFlags::NON_UNIQUE;
     }
     let app = adw::Application::builder()
-        .application_id(if demo { "io.github.ferrite.Ferrite.Demo" } else { APP_ID })
+        .application_id(if demo {
+            "io.github.ferrite.Ferrite.Demo"
+        } else if separate {
+            "io.github.ferrite.Ferrite.Profile"
+        } else {
+            APP_ID
+        })
         .flags(flags)
         .build();
     app.add_main_option(
@@ -63,7 +76,7 @@ fn main() -> glib::ExitCode {
 
     let ew = ensure_window.clone();
     app.connect_activate(move |app| {
-        ew(app).window.present();
+        ew(app).show();
     });
 
     app.connect_open(move |app, files, _| {
@@ -168,6 +181,7 @@ fn start_engine(w: &Rc<Window>, rt: tokio::runtime::Handle, demo: bool) {
         return;
     }
     let cfg = w.config.borrow().clone();
+    cfg.apply_encryption();
     let w = w.clone();
     glib::spawn_future_local(async move {
         let opts = |port| EngineOptions {
@@ -178,6 +192,10 @@ fn start_engine(w: &Rc<Window>, rt: tokio::runtime::Handle, demo: bool) {
             upnp: cfg.upnp,
             down_limit_kbps: cfg.down_limit_kbps,
             up_limit_kbps: cfg.up_limit_kbps,
+            proxy_url: cfg.proxy_url.clone(),
+            blocklist_url: cfg.blocklist_url.clone(),
+            bind_device: cfg.bind_device.clone(),
+            peer_limit: (cfg.peer_limit > 0).then_some(cfg.peer_limit as usize),
         };
         match Engine::start(rt.clone(), opts(cfg.listen_port)).await {
             Ok(e) => {
@@ -186,10 +204,23 @@ fn start_engine(w: &Rc<Window>, rt: tokio::runtime::Handle, demo: bool) {
             }
             Err(first) => {
                 // The port may be taken (another client running): try any free port.
-                match Engine::start(rt, opts(0)).await {
+                match Engine::start(rt.clone(), opts(0)).await {
                     Ok(e) => {
                         w.set_engine(e);
                         w.toast(&format!("Port {} is busy — using another one for now", cfg.listen_port));
+                    }
+                    Err(_) if cfg.proxy_url.is_some() || cfg.blocklist_url.is_some() || cfg.bind_device.is_some() => {
+                        // A proxy, blocklist or interface that doesn't work: start without them and say so.
+                        let plain = EngineOptions { proxy_url: None, blocklist_url: None, bind_device: None, ..opts(0) };
+                        match Engine::start(rt, plain).await {
+                            Ok(e) => {
+                                w.set_engine(e);
+                                w.show_engine_warning(&format!(
+                                    "Started without the proxy, blocklist and interface settings — they stopped the engine: {first:#}"
+                                ));
+                            }
+                            Err(_) => w.show_engine_error(&first),
+                        }
                     }
                     Err(_) => w.show_engine_error(&first),
                 }
