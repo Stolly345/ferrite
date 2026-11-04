@@ -86,6 +86,17 @@ fn torrent_from_bytes(bytes: Bytes) -> anyhow::Result<ParsedTorrentFile> {
         "all fields in torrent: {:#?}",
         bencode::dyn_from_bytes::<ByteBuf>(&bytes)
     );
+    // Ferrite patch: a v2-only torrent is read through its v1 translation (see v2.rs), keeping
+    // its own info hash and info dictionary, and the original .torrent for persistence.
+    if crate::v2::is_v2_only(&bytes) {
+        let t = crate::v2::translate(&bytes)?;
+        let v1 = Bytes::from(t.v1_torrent);
+        let parsed = librqbit_core::torrent_metainfo::torrent_from_bytes(&v1)?;
+        let mut meta = parsed.clone_to_owned(Some(&v1));
+        meta.info_hash = Id20::new(t.info_hash);
+        meta.info.raw_bytes = ByteBufOwned::from(t.info_bytes);
+        return Ok(ParsedTorrentFile { meta, torrent_bytes: bytes });
+    }
     let parsed = librqbit_core::torrent_metainfo::torrent_from_bytes(&bytes)?;
     Ok(ParsedTorrentFile {
         meta: parsed.clone_to_owned(Some(&bytes)),

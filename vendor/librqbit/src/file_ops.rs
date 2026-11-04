@@ -109,6 +109,20 @@ impl<'a> FileOps<'a> {
 
         let mut read_buffer = vec![0u8; 65536];
 
+        // Ferrite patch: v2 pieces are checked one by one against their Merkle roots.
+        if let Some(v2) = self.v2() {
+            for piece_info in self.torrent.lengths().iter_piece_infos() {
+                if pause_requested.load(Ordering::Relaxed) {
+                    bail!("initial check paused");
+                }
+                progress.fetch_add(piece_info.len as u64, Ordering::Relaxed);
+                if self.check_piece_v2(&v2, piece_info.piece_index).unwrap_or(false) {
+                    have_pieces.set(piece_info.piece_index.get() as usize, true);
+                }
+            }
+            return Ok(have_pieces);
+        }
+
         for piece_info in self.torrent.lengths().iter_piece_infos() {
             if pause_requested.load(Ordering::Relaxed) {
                 bail!("initial check paused");
@@ -183,9 +197,28 @@ impl<'a> FileOps<'a> {
         Ok(have_pieces)
     }
 
+    /// Ferrite patch: the v2 hashes, when this is a translated v2-only torrent.
+    fn v2(&self) -> Option<std::sync::Arc<crate::v2::V2Hashes>> {
+        crate::v2::lookup(self.torrent.info().pieces.as_ref())
+    }
+
+    /// Ferrite patch: checks a v2 piece — the Merkle root of the file's bytes in it (never padding).
+    fn check_piece_v2(&self, v2: &crate::v2::V2Hashes, piece_index: ValidPieceIndex) -> anyhow::Result<bool> {
+        let p = v2.pieces.get(piece_index.get() as usize).context("v2: piece out of range")?;
+        let fi = self.file_infos.get(p.file).context("v2: file out of range")?;
+        let in_file = self.torrent.lengths().piece_offset(piece_index) - fi.offset_in_torrent;
+        let len = std::cmp::min(self.torrent.lengths().piece_length(piece_index) as u64, fi.len - in_file) as usize;
+        let mut data = vec![0u8; len];
+        self.files.pread_exact(p.file, in_file, &mut data)?;
+        Ok(crate::v2::piece_root(&data, p.leaves) == p.hash)
+    }
+
     pub fn check_piece(&self, piece_index: ValidPieceIndex) -> anyhow::Result<bool> {
         if cfg!(feature = "_disable_disk_write_net_benchmark") {
             return Ok(true);
+        }
+        if let Some(v2) = self.v2() {
+            return self.check_piece_v2(&v2, piece_index);
         }
 
         let mut h = Sha1::new();

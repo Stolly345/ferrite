@@ -113,6 +113,9 @@ fn plain_error(e: &str) -> String {
 
 #[derive(Clone, Debug)]
 pub struct FileRow {
+    /// The file's index in the torrent (padding files are left out of lists, so it can differ
+    /// from the position).
+    pub index: usize,
     pub name: String,
     pub size: u64,
     pub done: u64,
@@ -142,7 +145,8 @@ pub struct Details {
 /// What a torrent holds, read before it is added, for the "Add torrent" dialog.
 pub struct Preview {
     pub name: String,
-    pub files: Vec<(String, u64)>,
+    /// (index in the torrent, path, size); padding files left out.
+    pub files: Vec<(usize, String, u64)>,
     pub torrent: Vec<u8>,
 }
 
@@ -192,6 +196,18 @@ pub fn torrent_with_trackers(info: &[u8], trackers: &[String]) -> Vec<u8> {
     bytes(&mut out, b"info");
     out.extend_from_slice(info);
     out.push(b'e');
+    out
+}
+
+/// Like `torrent_with_trackers`, but keeps a v2 torrent's piece layers (sorted after "info").
+pub fn rebuild_with_trackers(original: &[u8], info: &[u8], trackers: &[String]) -> Vec<u8> {
+    let mut out = torrent_with_trackers(info, trackers);
+    if let Some(layers) = librqbit::v2::top_level_raw(original, b"piece layers") {
+        out.pop();
+        out.extend_from_slice(b"12:piece layers");
+        out.extend_from_slice(layers);
+        out.push(b'e');
+    }
     out
 }
 
@@ -334,7 +350,9 @@ impl Engine {
                     let files = l
                         .info
                         .iter_file_details()
-                        .map(|f| (f.filename.to_string(), f.len))
+                        .enumerate()
+                        .filter(|(_, f)| !f.attrs().padding)
+                        .map(|(i, f)| (i, f.filename.to_string(), f.len))
                         .collect();
                     Ok(Preview {
                         name,
@@ -512,7 +530,7 @@ impl Engine {
     /// Replaces the torrent's trackers (keeps the info hash: only the outer .torrent changes).
     pub async fn set_trackers(&self, id: usize, trackers: Vec<String>) -> Result<()> {
         let info = self.torrent_info(id).context("The torrent's details aren't known yet")?;
-        let torrent = torrent_with_trackers(&info.info, &trackers);
+        let torrent = rebuild_with_trackers(&info.torrent, &info.info, &trackers);
         let folder = info.folder.clone();
         self.readd(id, info, torrent, folder).await
     }
@@ -661,8 +679,8 @@ pub enum Source {
     File(PathBuf),
 }
 
-const V2_ONLY: &str = "This is a BitTorrent v2-only torrent, which Ferrite can't open yet. \
-Hybrid (v1 + v2) and v1 torrents work — look for one of those.";
+const V2_ONLY: &str = "This is a BitTorrent v2-only magnet link, which Ferrite can't open yet. \
+Use the torrent's .torrent file instead, or a hybrid (v1 + v2) magnet.";
 
 impl Source {
     fn into_add(self) -> Result<AddTorrent<'static>> {
@@ -675,10 +693,6 @@ impl Source {
             }
             Source::File(p) => {
                 let bytes = std::fs::read(&p).with_context(|| format!("couldn't read {}", p.display()))?;
-                let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
-                if has(b"9:file tree") && !has(b"6:pieces") {
-                    bail!(V2_ONLY);
-                }
                 AddTorrent::from_bytes(bytes)
             }
         })
@@ -691,6 +705,21 @@ impl Real {
             it.map(|(id, h)| {
                 let stats = h.stats();
                 let has_meta = h.metadata.load().is_some();
+                // Alignment padding (hybrid and v2 torrents) is counted by the engine but isn't data.
+                let pad: u64 = h
+                    .metadata
+                    .load()
+                    .as_ref()
+                    .map(|m| m.file_infos.iter().filter(|f| f.attrs.padding).map(|f| f.len).sum())
+                    .unwrap_or(0);
+                let real_size = stats.total_bytes.saturating_sub(pad);
+                let real_done = if stats.total_bytes == 0 {
+                    0
+                } else if stats.progress_bytes >= stats.total_bytes {
+                    real_size
+                } else {
+                    (stats.progress_bytes as f64 * real_size as f64 / stats.total_bytes as f64) as u64
+                };
                 let state = match stats.state {
                     TorrentStatsState::Initializing { .. } if !has_meta => State::GettingFileList,
                     TorrentStatsState::Initializing { .. } => State::Checking,
@@ -710,15 +739,15 @@ impl Real {
                     }
                     None => (0, 0, 0),
                 };
-                let remaining = stats.total_bytes.saturating_sub(stats.progress_bytes);
+                let remaining = real_size.saturating_sub(real_done);
                 let eta = (state == State::Downloading && down_bps > 0)
                     .then(|| Duration::from_secs(remaining / down_bps));
                 TorrentRow {
                     id,
                     hash: h.info_hash().as_string(),
                     name: h.name().unwrap_or_else(|| h.info_hash().as_string()),
-                    size: stats.total_bytes,
-                    done: stats.progress_bytes,
+                    size: real_size,
+                    done: real_done,
                     uploaded: stats.uploaded_bytes,
                     state,
                     error: stats.error.clone(),
@@ -741,7 +770,9 @@ impl Real {
             .unwrap_or_default()
             .into_iter()
             .enumerate()
+            .filter(|(_, f)| !f.attributes.padding)
             .map(|(i, f)| FileRow {
+                index: i,
                 name: f.name,
                 size: f.length,
                 done: stats.file_progress.get(i).copied().unwrap_or(0),
@@ -955,7 +986,9 @@ impl Demo {
         let files = d
             .files
             .iter()
-            .map(|(n, s)| FileRow {
+            .enumerate()
+            .map(|(i, (n, s))| FileRow {
+                index: i,
                 name: n.clone(),
                 size: *s,
                 done: (*s as f64 * p) as u64,
@@ -1052,7 +1085,7 @@ mod tests {
 
         let preview = engine.preview(Source::File(torrent_path.clone())).await.unwrap();
         assert_eq!(preview.name, "sample.bin");
-        assert_eq!(preview.files, vec![("sample.bin".to_string(), 3_000_000)]);
+        assert_eq!(preview.files, vec![(0, "sample.bin".to_string(), 3_000_000)]);
 
         let hash = engine
             .add(preview.torrent, AddOptions { folder: data.clone(), only_files: None, paused: false })
@@ -1273,7 +1306,16 @@ mod tests {
         let out = dir.join("ferrite-out");
         add_from_peer(&engine, std::fs::read(dir.join("interop.torrent")).unwrap(), out.clone(), peer).await;
         let row = wait_row(&engine, |r| r.state == State::Seeding).await;
-        assert_eq!(std::fs::read(out.join("data.bin")).unwrap(), std::fs::read(dir.join("data.bin")).unwrap());
+        fn same(a: &std::path::Path, b: &std::path::Path) -> bool {
+            if a.is_dir() {
+                std::fs::read_dir(a).unwrap().flatten().all(|e| same(&e.path(), &b.join(e.file_name())))
+            } else {
+                std::fs::read(a).ok() == std::fs::read(b).ok()
+            }
+        }
+        // A folder torrent's files land straight in the folder Ferrite was given.
+        let ok = if dir.join("set").is_dir() { same(&dir.join("set"), &out) } else { same(&dir.join("data.bin"), &out.join("data.bin")) };
+        assert!(ok, "downloaded files differ");
         eprintln!("interop download ok: {} bytes", row.size);
         engine.stop().await;
     }
@@ -1287,7 +1329,9 @@ mod tests {
         librqbit::mse::set_mode(librqbit::mse::Mode::Require);
         let engine = Engine::start(tokio::runtime::Handle::current(), offline_opts(&dir, "ferrite-seed")).await.unwrap();
         let torrent = std::fs::read(dir.join("interop.torrent")).unwrap();
-        engine.add(torrent, AddOptions { folder: dir.clone(), only_files: None, paused: false }).await.unwrap();
+        // A folder torrent's files live in the folder itself.
+        let folder = if dir.join("set").is_dir() { dir.join("set") } else { dir.clone() };
+        engine.add(torrent, AddOptions { folder, only_files: None, paused: false }).await.unwrap();
         wait_for(&engine, State::Seeding).await;
         std::fs::write(dir.join("port.txt"), engine.listen_port().unwrap().to_string()).unwrap();
         for _ in 0..900 {
@@ -1299,6 +1343,57 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("the other client never finished downloading from Ferrite");
+    }
+
+    /// A v2-only torrent built by hand (file tree, SHA-256 Merkle root, no v1 hashes): checked,
+    /// seeded, and caught when its data is damaged — all through the v2 code path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn v2_only_torrent_verifies() {
+        use sha2::{Digest, Sha256};
+        let root_dir = std::env::temp_dir().join(format!("ferrite-v2-{}", std::process::id()));
+        let data_dir = root_dir.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // 20 000 bytes = two 16 KiB blocks, one 32 KiB piece.
+        let content: Vec<u8> = (0..20_000u32).map(|i| (i.wrapping_mul(131) >> 3) as u8).collect();
+        std::fs::write(data_dir.join("v2.bin"), &content).unwrap();
+        let leaf = |b: &[u8]| -> [u8; 32] { Sha256::digest(b).into() };
+        let (l0, l1) = (leaf(&content[..16384]), leaf(&content[16384..]));
+        let root: [u8; 32] = Sha256::digest([l0, l1].concat()).into();
+        assert_eq!(librqbit::v2::piece_root(&content, 2), root, "Merkle helper agrees");
+
+        let bstr = |b: &[u8]| [b.len().to_string().as_bytes(), b":", b].concat();
+        let info = [
+            b"d9:file treed".to_vec(),
+            bstr(b"v2.bin"),
+            b"d0:d6:lengthi20000e11:pieces root".to_vec(),
+            bstr(&root),
+            b"eee12:meta versioni2e4:name".to_vec(),
+            bstr(b"v2.bin"),
+            b"12:piece lengthi32768ee".to_vec(),
+        ]
+        .concat();
+        let torrent = [b"d4:info".to_vec(), info.clone(), b"e".to_vec()].concat();
+        assert!(librqbit::v2::is_v2_only(&torrent));
+
+        let engine = Engine::start(tokio::runtime::Handle::current(), offline_opts(&root_dir, "e")).await.unwrap();
+        let hash = engine
+            .add(torrent, AddOptions { folder: data_dir.clone(), only_files: None, paused: false })
+            .await
+            .unwrap();
+        let want: [u8; 32] = Sha256::digest(&info).into();
+        assert_eq!(hash, want[..20].iter().map(|b| format!("{b:02x}")).collect::<String>(), "v2 info hash");
+        let row = wait_for(&engine, State::Seeding).await;
+        assert_eq!((row.size, row.done), (20_000, 20_000));
+
+        let mut bad = content.clone();
+        bad[100] ^= 1;
+        std::fs::write(data_dir.join("v2.bin"), &bad).unwrap();
+        engine.pause(row.id).await.unwrap();
+        engine.verify(row.id).await.unwrap();
+        let row = wait_row(&engine, |r| r.hash == hash && !matches!(r.state, State::Checking | State::GettingFileList)).await;
+        assert!(row.done < row.size, "damaged v2 data must fail its check: {row:?}");
+        engine.stop().await;
+        let _ = std::fs::remove_dir_all(&root_dir);
     }
 
     async fn wait_row(engine: &Engine, f: impl Fn(&TorrentRow) -> bool) -> TorrentRow {

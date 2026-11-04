@@ -61,6 +61,8 @@ mod ip_ranges;
 pub mod limits;
 /// Ferrite patch: protocol encryption (MSE/PE).
 pub mod mse;
+/// Ferrite patch: BitTorrent v2-only .torrent files.
+pub mod v2;
 mod listen;
 mod merge_streams;
 mod peer_connection;

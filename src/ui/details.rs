@@ -411,7 +411,9 @@ impl DetailsPane {
                 self.file_widgets.borrow_mut().clear();
                 return;
             }
+            let indices: Vec<usize> = d.files.iter().map(|f| f.index).collect();
             for (r, f) in d.files.iter().enumerate() {
+                let fidx = f.index;
                 let check = gtk::CheckButton::builder().active(f.included).tooltip_text("Download this file").build();
                 let name = gtk::Label::builder()
                     .label(&f.name)
@@ -433,14 +435,14 @@ impl DetailsPane {
                 let prio = gtk::DropDown::from_strings(&PRIORITIES);
                 prio.set_valign(gtk::Align::Center);
                 prio.set_tooltip_text(Some("Download priority"));
-                prio.set_selected(priority_to_pos(priorities.get(r).copied().unwrap_or(1)));
+                prio.set_selected(priority_to_pos(priorities.get(fidx).copied().unwrap_or(1)));
                 let (cb, updating) = (self.on_priority.clone(), self.updating_files.clone());
                 prio.connect_selected_notify(move |dd| {
                     if updating.get() {
                         return;
                     }
                     if let Some(cb) = cb.borrow().as_ref() {
-                        cb(id, r, pos_to_priority(dd.selected()));
+                        cb(id, fidx, pos_to_priority(dd.selected()));
                     }
                 });
                 grid.attach(&prio, 6, r as i32, 1, 1);
@@ -455,7 +457,7 @@ impl DetailsPane {
                     let (cb, name) = (self.on_play.clone(), f.name.clone());
                     play.connect_clicked(move |_| {
                         if let Some(cb) = cb.borrow().as_ref() {
-                            cb(id, r, name.clone());
+                            cb(id, fidx, name.clone());
                         }
                     });
                     grid.attach(&play, 5, r as i32, 1, 1);
@@ -466,6 +468,7 @@ impl DetailsPane {
             let checks: Vec<gtk::CheckButton> = widgets.iter().map(|w| w.0.clone()).collect();
             for c in &checks {
                 let checks = checks.clone();
+                let indices = indices.clone();
                 let updating = self.updating_files.clone();
                 let cb = self.on_files.clone();
                 c.connect_toggled(move |_| {
@@ -476,7 +479,7 @@ impl DetailsPane {
                         .iter()
                         .enumerate()
                         .filter(|(_, c)| c.is_active())
-                        .map(|(i, _)| i)
+                        .map(|(i, _)| indices[i])
                         .collect();
                     if let Some(cb) = cb.borrow().as_ref() {
                         cb(id, included);

@@ -1542,10 +1542,26 @@ impl PeerHandler {
         ) {
             Some(d) => d,
             None => {
-                anyhow::bail!(
-                    "received {:?}, but it is not a valid chunk request (chunk data is invalid). Ignoring.",
-                    request
-                );
+                // Ferrite patch: v2 peers stop a request at the end of a file's data, before the
+                // padding that aligns the next file; serve the start of the chunk they asked for.
+                let partial = (request.length > 0)
+                    .then(|| {
+                        self.state.lengths.iter_chunk_infos(piece_index).find(|ci| {
+                            ci.offset == request.begin && request.length < ci.size
+                        })
+                    })
+                    .flatten()
+                    .map(|mut ci| {
+                        ci.size = request.length;
+                        ci
+                    });
+                match partial {
+                    Some(ci) => ci,
+                    None => anyhow::bail!(
+                        "received {:?}, but it is not a valid chunk request (chunk data is invalid). Ignoring.",
+                        request
+                    ),
+                }
             }
         };
 

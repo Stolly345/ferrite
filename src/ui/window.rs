@@ -864,7 +864,7 @@ impl Window {
             let complete = w
                 .engine()
                 .and_then(|e| e.details(id))
-                .and_then(|d| d.files.get(idx).map(|f| f.size > 0 && f.done >= f.size))
+                .and_then(|d| d.files.iter().find(|f| f.index == idx).map(|f| f.size > 0 && f.done >= f.size))
                 .unwrap_or(false);
             super::play::play_file(&w, id, idx, &name, complete);
         });

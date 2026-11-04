@@ -300,7 +300,7 @@ impl AddDialog {
                     .iter()
                     .enumerate()
                     .filter(|(_, c)| c.is_active())
-                    .map(|(i, _)| i)
+                    .map(|(i, _)| preview.files[i].0)
                     .collect();
                 let only_files = (included.len() != preview.files.len()).then_some(included);
                 let folder = target_folder(&s.base, &preview);
@@ -318,7 +318,7 @@ impl AddDialog {
     fn show_preview(self: &Rc<Self>, preview: Preview) {
         self.title.set_label(&preview.name);
         let mut checks = Vec::new();
-        for (name, size) in &preview.files {
+        for (_, name, size) in &preview.files {
             let check = gtk::CheckButton::builder().active(true).valign(gtk::Align::Center).build();
             let row = adw::ActionRow::builder()
                 .title(glib::markup_escape_text(name))
@@ -361,13 +361,13 @@ impl AddDialog {
         };
         let folder = target_folder(&s.base, preview);
         self.folder_row.set_subtitle(&glib::markup_escape_text(&folder.display().to_string()));
-        let total: u64 = preview.files.iter().map(|f| f.1).sum();
+        let total: u64 = preview.files.iter().map(|f| f.2).sum();
         let chosen: u64 = preview
             .files
             .iter()
             .zip(&s.checks)
             .filter(|(_, c)| c.is_active())
-            .map(|(f, _)| f.1)
+            .map(|(f, _)| f.2)
             .sum();
         let any = s.checks.iter().any(|c| c.is_active());
         let free = free_space(&folder);

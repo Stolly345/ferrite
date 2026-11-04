@@ -121,7 +121,9 @@ tests where it can be (see the README).
 - **Networking:** protocol encryption MSE/PE (prefer / require / off — checked against libtorrent both ways), NAT-PMP
   alongside UPnP, SOCKS5 proxy, IP blocklist, binding to an interface, peers per torrent, banning peers.
 - **Web seeds** (BEP 19), **file priorities**, **peer progress** — engine patches in `vendor/librqbit`.
-- **BitTorrent v2:** hybrid v1 + v2 torrents work; v2-only torrents are refused with a plain explanation.
+- **BitTorrent v2:** hybrid and v2-only .torrent files work (SHA-256 Merkle verification, v2 info hash), checked
+  against libtorrent both ways; v2-only magnet links are refused with a plain explanation (they need BEP 52 hash
+  requests).
 
 ### 5.3 Planned
 

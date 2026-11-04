@@ -16,7 +16,7 @@ own orange — as in these pictures.
 
 - **Interface:** GTK 4 + libadwaita, through [gtk4-rs](https://gtk-rs.org)
 - **Engine:** [librqbit](https://github.com/ikatson/rqbit), a BitTorrent engine written in Rust, extended in
-  `vendor/librqbit` with protocol encryption, web seeds, file priorities and peer bans: DHT, trackers,
+  `vendor/librqbit` with protocol encryption, BitTorrent v2, web seeds, file priorities and peer bans: DHT, trackers,
   µTP, UPnP, fast resume
 - **No ads, no telemetry, no account.** Apache-2.0.
 
@@ -103,6 +103,7 @@ simulated transfers, no network.</sub>
 - **Networking:** protocol encryption (prefer, require or off), UPnP and NAT-PMP port forwarding, SOCKS5 proxy,
   IP blocklist, binding to one network interface (a VPN's), peers per torrent, and banning peers
 - **Web seeds:** torrents that list HTTP mirrors download from them as well as from peers
+- **BitTorrent v2:** v2-only and hybrid torrents, from .torrent files, checked with v2's SHA-256 hashes
 - **Peers in detail:** address, client, how much of the torrent they have, speeds, connection flags
 - **Total speeds** in the title bar
 - **Problems in plain words** — "Disk is full — make room, then resume" — and fixed by resuming
@@ -141,12 +142,14 @@ cargo deb
 ```
 
 `cargo test` runs offline: the unit tests, round trips through the real engine (add, verify, pause, resume,
-remove, move data, edit trackers, private torrents), a web-seed-only download from a local HTTP server, and a small
+remove, move data, edit trackers, private torrents), a hand-built BitTorrent v2-only torrent (verified, then caught
+when damaged), a web-seed-only download from a local HTTP server, and a small
 swarm on this computer where one engine downloads from another with encryption required and a third, having
 banned the address, gets nothing.
 
-Two more tests check compatibility with libtorrent (the engine of qBittorrent and Deluge) with encryption forced
-both ways; they need another client running and are skipped unless asked for:
+Two more tests check compatibility with libtorrent (the engine of qBittorrent and Deluge) with encryption forced,
+in both directions, for v1, hybrid and v2-only (single- and multi-file) torrents; they need another client running
+and are skipped unless asked for:
 
 ```sh
 FERRITE_INTEROP_DIR=… FERRITE_INTEROP_PEER=127.0.0.1:6881 cargo test interop_download_encrypted -- --ignored
@@ -210,7 +213,7 @@ desktop accent (as the pictures here do).
 
 ## Roadmap
 
-BitTorrent v2-only torrents (hybrid v1 + v2 torrents already work), "when downloads finish" actions (sleep, shut
+v2-only magnet links (v2-only .torrent files and hybrid torrents work), "when downloads finish" actions (sleep, shut
 down), translations, Flatpak. The full plan is in the [product requirements](docs/PRD.md).
 
 ## Credits

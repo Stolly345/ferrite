@@ -23,10 +23,9 @@ pub fn main_media(win: &Window, id: usize) -> Option<(usize, String, bool)> {
     let d = win.engine()?.details(id)?;
     d.files
         .iter()
-        .enumerate()
-        .filter(|(_, f)| is_media(&f.name))
-        .max_by_key(|(_, f)| f.size)
-        .map(|(i, f)| (i, f.name.clone(), f.size > 0 && f.done >= f.size))
+        .filter(|f| is_media(&f.name))
+        .max_by_key(|f| f.size)
+        .map(|f| (f.index, f.name.clone(), f.size > 0 && f.done >= f.size))
 }
 
 pub fn play_torrent(win: &Rc<Window>, item: &TorrentItem) {
